@@ -29,8 +29,7 @@
 
 #include <serializer.h>
 
-typedef int (*fg_handle_event_cb)(void *, int32_t, int32_t *,
-								  struct fgevent *fgev);
+typedef int (*fg_handle_event_cb)(void *, struct fgevent *, struct fgevent *);
 
 struct fg_events_data {	
 	struct event_base  	  *base;
@@ -38,6 +37,7 @@ struct fg_events_data {
 	struct bufferevent 	  *bev;
     pthread_t             *events_t;
     fg_handle_event_cb    cb;
+    sem_t				  init_flag;
     void			      *user_data;
     char 		 	      *addr;
     uint16_t		      port;
