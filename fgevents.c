@@ -2,7 +2,19 @@
  *  fagelmatare-serializer
  *    Library used for event-based communication between master and slave
  *  fgevents.c
- *    Routines for sending/receiving events between client and server
+ *    Routines for sending/receiving events between client and server The data
+ *	  is sent via events and are serialized and delimited with STX/ETX control
+ *	  characters. Preceding the ETX delimiter is a 2-byte checksum to verify
+ *    the integrity of an event. This is the layout of a serialized event:
+ *	  
+ *		1 - STX
+ *		4 - id
+ *		1 - writeback
+ *		4 - length
+ *		? - payload
+ *		2 - CRC-9
+ *		1 - ETX
+ *		
  *****************************************************************************
  *  This file is part of Fågelmataren, an embedded project created to learn
  *  Linux and C. See <https://github.com/Linkaan/Fagelmatare>
@@ -51,7 +63,7 @@
 #define report_error_en(str, en, msg)\
         do { errno = en;report_error (str, msg); } while(0)
 
-static void set_tcp_no_delay(evutil_socket_t fd)
+static void set_tcp_no_delay (evutil_socket_t fd)
 {
 	int one = 1;
   	setsockopt (fd, IPPROTO_TCP, TCP_NODELAY,
@@ -68,7 +80,7 @@ fg_read_cb (struct bufferevent *bev, void *arg)
 	struct evbuffer *input;
 
 	itdata = (struct fg_events_data *) arg;
-	input = bufferevent_get_input(bev);
+	input = bufferevent_get_input (bev);
 
   	len = evbuffer_get_length (input);
   	buffer = malloc (len);
@@ -81,12 +93,17 @@ fg_read_cb (struct bufferevent *bev, void *arg)
   	  }
   	evbuffer_copyout (input, data, len);
 
+  	ptr = buffer;
   	while (ptr - buffer < len)
   	  {  	 
   		struct fgevent fgev, *ansev;
   		int writeback;
 
-  		ptr = deserialize_fgevent (ptr, &fgev);
+  		while (ptr - buffer < len && ptr[0] != 0x02) // STX
+  			ptr++;
+  		if (ptr - buffer >= len)
+  			break;
+  		ptr = deserialize_fgevent (++ptr, &fgev);
 
   		/* Check if event was successfully parsed, if not we must increment
   		   ptr by payload length to prevent any events next to be incorrectly
@@ -100,10 +117,36 @@ fg_read_cb (struct bufferevent *bev, void *arg)
   		  	ptr += fgev.length;
   		  	continue;
   		  }
-  		writeback = ítdata->cb (itdata->user_data, fgev.length, fgev.payload, &ansev);
+  		while (ptr - buffer < len && ptr[0] != 0x03) // ETX
+  			ptr++;
+  		writeback = ítdata->cb (itdata->user_data, fgev.length, fgev.payload,
+  							    &ansev);
   		if (writeback)
   		  {
-  		  	// writeback to server/client
+  		  	unsigned char *buffer2;
+  		  	size_t nbytes;
+
+  		  	nbytes = 2; // for STX and ETX delimiter
+  		  	nbytes += sizeof (ansev->id);
+  		  	nbytes += sizeof (ansev->writeback);
+  		  	nbytes += sizeof (ansev->length);
+  		  	if (ansev->length > 0)
+  		  		nbytes += ansev->length * sizeof (ansev->payload[0]);
+  		  	buffer2 = malloc (nbytes);
+		  	if (!buffer2)
+		  	  {
+		  		itdata->save_errno = errno;
+		  		report_error (itdata->error,
+		  					  "in function fg_read_cb malloc failed");
+		  		itdata->cb (itdata->user_data, -1, NULL, NULL);
+		  		continue;
+		  	  }
+
+		  	buffer2[0] = 0x02; // STX
+  		  	serialize_fgevent (buffer2 + 1, ansev);
+  		  	buffer2[nbytes-1] = 0x03; // ETX
+
+  		  	bufferevent_write (bev, buffer2, nbytes);
   		  }
   	  }
 
@@ -185,6 +228,32 @@ accept_error_cb (struct evconnlistener *listener, void *arg)
 	event_base_loopexit (base, NULL);
 }
 
+int
+fg_send_event (struct bufferevent *bev, struct fgevent *fgev)
+{
+	evutil_socket_t fd;
+	unsigned char *buffer;
+  	size_t nbytes;
+
+  	nbytes = 2; // for STX and ETX delimiter
+  	nbytes += sizeof (fgev->id);
+  	nbytes += sizeof (fgev->writeback);
+  	nbytes += sizeof (fgev->length);
+  	if (fgev->length > 0)
+  		nbytes += fgev->length * sizeof (fgev->payload[0]);
+  	buffer = malloc (nbytes);
+	if (!buffer)
+		return -1;
+
+	buffer[0] = 0x02; // STX
+  	serialize_fgevent (buffer+1, ansev);
+  	buffer[nbytes-1] = 0x03; // ETX
+
+	evbuffer_add (bufferevent_get_output (bev), buffer, nbytes);
+	fd = bufferevent_getfd (bev);
+	evbuffer_write (bufferevent_get_output (bev), fd);
+}
+
 static void *
 events_thread_server_start (void *param)
 {
@@ -251,8 +320,7 @@ events_thread_client_start (void *param)
 	itdata->bev = bufferevent_socket_new (base, -1, BEV_OPT_CLOSE_ON_FREE);
 
     bufferevent_setcb (itdata->bev, readcb, NULL, eventcb, NULL);
-    bufferevent_enable (itdata->bev, EV_READ | EV_WRITE);
-    evbuffer_add (bufferevent_get_output (itdata->bev), message, block_size);
+    bufferevent_enable (itdata->bev, EV_READ | EV_WRITE);    
 
 	if (port > 0)
 	  {

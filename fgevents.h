@@ -54,6 +54,9 @@ extern int fg_events_client_init_inet (struct *fg_events_data,
 extern int fg_events_client_init_unix (struct *fg_events_data,
 	 								   fg_handle_event_cb, const char *);
 
+/* Function to send event to server from client */
+extern int fg_send_event (struct bufferevent *, struct fgevent *);
+
 /* Tear down event loop and cleanup */
 extern void fg_events_server_shutdown (struct *fg_events_data);
 extern void fg_events_client_shutdown (struct *fg_events_data);
