@@ -27,21 +27,32 @@
 #include <errno.h>
 #include <stdint.h>
 
-typedef void (*fg_event_cb)(int32_t, int32_t *);
+#include <serializer.h>
+
+typedef int (*fg_handle_event_cb)(void *, int32_t, int32_t *,
+								  struct fgevent *fgev);
 
 struct fg_events_data {	
-	struct event_base *base;
-    pthread_t         *events_t;
-    fg_event_cb 	  cb;
-    char 		 	  *addr;
-    uint16_t		  port;
-    errno_t 		  save_errno;
-    char			  error[512];	  
+	struct event_base  	  *base;
+	struct evconnlistener *listener;
+	struct bufferevent 	  *bev;
+    pthread_t             *events_t;
+    fg_handle_event_cb    cb;
+    void			      *user_data;
+    char 		 	      *addr;
+    uint16_t		      port;
+    errno_t 		      save_errno;
+    char			      error[512];	  
 };
 
 /* Initialize libevent and add asynchronous event listener, register cb */
-extern int fg_events_server_init (struct *fg_events_data, fg_event_cb, uint16_t port);
-extern int fg_events_client_init (struct *fg_events_data, fg_event_cb, const char *addr, uint16_t port);
+extern int fg_events_server_init (struct *fg_events_data, fg_handle_event_cb,
+								  uint16_t, const char *);
+extern int fg_events_client_init_inet (struct *fg_events_data,
+	 								   fg_handle_event_cb, const char *,
+	 								   uint16_t);
+extern int fg_events_client_init_unix (struct *fg_events_data,
+	 								   fg_handle_event_cb, const char *);
 
 /* Tear down event loop and cleanup */
 extern void fg_events_server_shutdown (struct *fg_events_data);
