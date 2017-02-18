@@ -28,7 +28,7 @@ VERSION := $(MAJOR).$(MINOR)
 
 INCLUDE ?= -I.
 LINKS ?= -L.
-CFLAGS := $(INCLUDE) -std=gnu11 -g -Wall -Wextra -D _GNU_SOURCE
+CFLAGS := $(INCLUDE) -std=gnu11 -fPIC -g -Wall -Wextra -D _GNU_SOURCE
 LDFLAGS := $(LINKS) -lfg-serializer -shared -Wl,-soname,lib$(NAME).so.$(MAJOR)
 SOURCES := fgevents.c
 HEADERS := fgevents.h

@@ -26,6 +26,12 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <semaphore.h>
+#include <pthread.h>
+
+#include <event2/listener.h>
+#include <event2/bufferevent.h>
+#include <event2/buffer.h>
 
 #include <serializer.h>
 
@@ -41,24 +47,24 @@ struct fg_events_data {
     void                  *user_data;
     char                  *addr;
     uint16_t              port;
-    errno_t               save_errno;
+    int                   save_errno;
     char                  error[512];     
 };
 
 /* Initialize libevent and add asynchronous event listener, register cb */
-extern int fg_events_server_init (struct *fg_events_data, fg_handle_event_cb,
-                                  uint16_t, const char *);
-extern int fg_events_client_init_inet (struct *fg_events_data,
-                                       fg_handle_event_cb, const char *,
+extern int fg_events_server_init (struct fg_events_data *, fg_handle_event_cb,
+                                  uint16_t, char *);
+extern int fg_events_client_init_inet (struct fg_events_data *,
+                                       fg_handle_event_cb, char *,
                                        uint16_t);
-extern int fg_events_client_init_unix (struct *fg_events_data,
-                                       fg_handle_event_cb, const char *);
+extern int fg_events_client_init_unix (struct fg_events_data *,
+                                       fg_handle_event_cb, char *);
 
 /* Function to send event to server from client */
 extern int fg_send_event (struct bufferevent *, struct fgevent *);
 
 /* Tear down event loop and cleanup */
-extern void fg_events_server_shutdown (struct *fg_events_data);
-extern void fg_events_client_shutdown (struct *fg_events_data);
+extern void fg_events_server_shutdown (struct fg_events_data *);
+extern void fg_events_client_shutdown (struct fg_events_data *);
 
 #endif /* _FGEVENTS_H_ */
