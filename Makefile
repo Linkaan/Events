@@ -37,15 +37,15 @@ OBJECTS = $(SOURCES:.c=.o)
 all: $(SOURCES) lib$(NAME).so.$(VERSION)
 
 lib$(NAME).so.$(VERSION): $(OBJECTS)
-    $(CC) $(OBJECTS) -o $@ $(LDFLAGS)
+	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
 
 %.o: %.c $(HEADERS)
-    ifndef CC
-    $(error CC not set, please invoke with CC set to path of arm-rpi-linux-gnueabihf-gcc)
-    endif
-    $(CC) -c $< -o $@ $(CFLAGS)
+	ifndef CC
+	$(error CC not set, please invoke with CC set to path of arm-rpi-linux-gnueabihf-gcc)
+	endif
+	$(CC) -c $< -o $@ $(CFLAGS)
 
 .PHONY: clean
 
 clean:
-    rm -f lib$(NAME).so* $(OBJECTS)
+	rm -f lib$(NAME).so* $(OBJECTS)
