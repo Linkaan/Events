@@ -40,9 +40,9 @@ lib$(NAME).so.$(VERSION): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
 
 %.o: %.c $(HEADERS)
-	ifndef CC
+    ifndef CC
 	$(error CC not set, please invoke with CC set to path of arm-rpi-linux-gnueabihf-gcc)
-	endif
+    endif
 	$(CC) -c $< -o $@ $(CFLAGS)
 
 .PHONY: clean
