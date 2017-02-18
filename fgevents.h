@@ -31,28 +31,28 @@
 
 typedef int (*fg_handle_event_cb)(void *, struct fgevent *, struct fgevent *);
 
-struct fg_events_data {	
-	struct event_base  	  *base;
-	struct evconnlistener *listener;
-	struct bufferevent 	  *bev;
+struct fg_events_data { 
+    struct event_base     *base;
+    struct evconnlistener *listener;
+    struct bufferevent    *bev;
     pthread_t             *events_t;
     fg_handle_event_cb    cb;
-    sem_t				  init_flag;
-    void			      *user_data;
-    char 		 	      *addr;
-    uint16_t		      port;
-    errno_t 		      save_errno;
-    char			      error[512];	  
+    sem_t                 init_flag;
+    void                  *user_data;
+    char                  *addr;
+    uint16_t              port;
+    errno_t               save_errno;
+    char                  error[512];     
 };
 
 /* Initialize libevent and add asynchronous event listener, register cb */
 extern int fg_events_server_init (struct *fg_events_data, fg_handle_event_cb,
-								  uint16_t, const char *);
+                                  uint16_t, const char *);
 extern int fg_events_client_init_inet (struct *fg_events_data,
-	 								   fg_handle_event_cb, const char *,
-	 								   uint16_t);
+                                       fg_handle_event_cb, const char *,
+                                       uint16_t);
 extern int fg_events_client_init_unix (struct *fg_events_data,
-	 								   fg_handle_event_cb, const char *);
+                                       fg_handle_event_cb, const char *);
 
 /* Function to send event to server from client */
 extern int fg_send_event (struct bufferevent *, struct fgevent *);
