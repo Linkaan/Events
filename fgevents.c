@@ -60,99 +60,158 @@
 
 #include "fgevents.h"
 
-#define report_error(str, msg)\
-        snprintf (str, sizeof str, "fgevents: %s: %d: %s: %s\n",\
-                  __FILE__, __LINE__, msg, strerror (errno))
+/* Temporary ugly log error macros before fgutil library is done */
+#define report_error(etdata, msg)\
+        do\
+          {\
+            etdata->save_errno = errno;\
+            snprintf (etdata->error, sizeof etdata->error,\
+                      "fgevents: %s: %d: %s: %s\n",\
+                      __FILE__, __LINE__, msg, strerror (errno));\
+            etdata->cb (itdata->user_data, NULL, NULL);\
+          } while (0)
 
-#define report_error_en(str, en, msg)\
-        do { errno = en;report_error (str, msg); } while(0)
+#define report_error_noen(etdata, msg)\
+        do\
+          {\
+            etdata->save_errno = 0;\
+            snprintf (etdata->error, sizeof etdata->error,\
+                      "fgevents: %s: %d: %s\n",\
+                      __FILE__, __LINE__, msg);\
+            itdata->cb (itdata->user_data, NULL, NULL);\
+          } while (0)
 
+#define report_error_en(etdata, en, msg)\
+        do { errno = en;report_error (etdata, msg); } while (0)
+
+/* Helper function to set tcp no delay on socket to disable
+   packet-accumulation delay */
 static void set_tcp_no_delay (evutil_socket_t fd)
 {
     int one = 1;
-    setsockopt (fd, IPPROTO_TCP, TCP_NODELAY,
-                &one, sizeof one);
+    setsockopt (fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+}
+
+/* Helper function to allocate memory for buffer and copy evbuffer to it */
+static ssize_t
+copy_evbuffer_into_buffer (struct evbuffer *evbuf, unsigned char **buf)
+{
+    ssize_t len;
+    unsigned char *buffer;
+
+    len = evbuffer_get_length (input);
+    buffer = malloc (len);
+    if (buffer == NULL)
+        return -1;
+
+    evbuffer_copyout (input, buffer, len);
+    *buf = buffer;
+
+    return len;
+}
+
+/* Helper function to parse fgevent delimitted with STX and ETX
+   control characters */
+static int
+parse_fgevent (struct fgevent *fgev, unsigned char *buffer,
+               ssize_t len, unsigned char **p)
+{
+    int s;
+    unsigned char *ptr = *p;
+
+    while ((size_t)(ptr - buffer) < len && ptr[0] != 0x02) // STX
+            ptr++;
+    if ((size_t)(ptr - buffer) >= len)
+        break;
+
+    /* Deserialize fgevent to fgev struct. If it fails to allocate memory we
+       increment by payload length */
+    ptr = deserialize_fgevent (++ptr, fgev);
+    s = fgev->length > 0 && !fgev->payload;
+    if (s)
+        ptr += fgev.length * sizeof (fgev->payload[0]);
+
+    while ((size_t)(ptr - buffer) < len && ptr[0] != 0x03) // ETX
+        ptr++;
+
+    *p = ptr;
+    return s;
+}
+
+static int
+create_serialized_fgevent_buffer (unsigned char **buf, struct fgevent *fgev)
+{
+    unsigned char *buffer;
+    struct evbuffer *output;
+    size_t nbytes;
+
+    nbytes = 2; // for STX and ETX delimiter
+    nbytes += sizeof (fgev->id);
+    nbytes += sizeof (fgev->writeback);
+    nbytes += sizeof (fgev->length);
+    if (fgev->length > 0)
+        nbytes += fgev->length * sizeof (fgev->payload[0]);
+
+    buffer = malloc (nbytes);
+    if (!buffer)
+        return -1;
+
+    buffer[0] = 0x02; // STX
+    serialize_fgevent (buffer+1, fgev);
+    buffer[nbytes-1] = 0x03; // ETX
+
+    *buf = buffer;
+
+    return 0;
 }
 
 
 static void
 fg_read_cb (struct bufferevent *bev, void *arg)
 {
-    size_t len;
+    ssize_t len;
     unsigned char *buffer, *ptr;
     struct fg_events_data *itdata = arg;
-    struct evbuffer *input;
 
-    input = bufferevent_get_input (bev);
-
-    len = evbuffer_get_length (input);
-    buffer = malloc (len);
-    if (!buffer)
+    len = copy_evbuffer_into_buffer (bufferevent_get_input (bev), &buffer);
+    if (len < 0)
       {
-        itdata->save_errno = errno;
-        report_error (itdata->error, "in function fg_read_cb malloc failed");
-        itdata->cb (itdata->user_data, NULL, NULL);
+        report_error (itdata, "in function fg_read_cb malloc failed");
         return;
       }
-    evbuffer_copyout (input, buffer, len);
-
+    
     ptr = buffer;
     while ((size_t)(ptr - buffer) < len)
-      {      
+      {
+        ssize_t s;
         struct fgevent fgev, ansev;
         int writeback;
 
-        while ((size_t)(ptr - buffer) < len && ptr[0] != 0x02) // STX
-            ptr++;
-        if ((size_t)(ptr - buffer) >= len)
-            break;
-        ptr = deserialize_fgevent (++ptr, &fgev);
-
-        /* Check if event was successfully parsed, if not we must increment
-           ptr by payload length to prevent any events next to be incorrectly
-           parsed */
-        if (fgev.length > 0 && !fgev.payload)
+        s = parse_fgevent (&fgev, buffer, len, &ptr);
+        if (s < 0)
           {
-            itdata->save_errno = ENOMEM;
-            report_error_en (itdata->error, itdata->save_errno,
-                             "in function fg_read_cb deserialize_fgevent failed");
-            itdata->cb (itdata->user_data, NULL, NULL);             
-            ptr += fgev.length;
+            report_error (itdata,
+                          "in function fg_read_cb parse_fgevent failed");
             continue;
           }
-        while ((size_t)(ptr - buffer) < len && ptr[0] != 0x03) // ETX
-            ptr++;
+        
         writeback = itdata->cb (itdata->user_data, &fgev, &ansev);
         if (writeback)
           {
-            unsigned char *buffer2;
-            size_t nbytes;
+            unsigned char *fgbuf;
 
-            nbytes = 2; // for STX and ETX delimiter
-            nbytes += sizeof (ansev.id);
-            nbytes += sizeof (ansev.writeback);
-            nbytes += sizeof (ansev.length);
-            if (ansev.length > 0)
-                nbytes += ansev.length * sizeof (ansev.payload[0]);
-            buffer2 = malloc (nbytes);
-            if (!buffer2)
+            s = create_serialized_fgevent_buffer (&fgbuf, &ansev);
+            if (s < 0)
+                report_error (itdata,
+                              "create_serialized_fgevent_buffer failed");
+            else
               {
-                itdata->save_errno = errno;
-                report_error (itdata->error,
-                              "in function fg_read_cb malloc failed");
-                itdata->cb (itdata->user_data, NULL, NULL);
-                continue;
-              }
+                evbuffer_lock (bufferevent_get_output (bev));
+                bufferevent_write (bev, fgbuf, nbytes);
+                evbuffer_unlock (bufferevent_get_output (bev));
 
-            buffer2[0] = 0x02; // STX
-            serialize_fgevent (buffer2 + 1, &ansev);
-            buffer2[nbytes-1] = 0x03; // ETX
-
-            evbuffer_lock (bufferevent_get_output (bev));
-            bufferevent_write (bev, buffer2, nbytes);
-            evbuffer_unlock (bufferevent_get_output (bev));
-
-            free (buffer2);
+                free (fgbuf);
+              }        
           }
 
         if (fgev.length > 0)
@@ -184,12 +243,9 @@ fg_event_client_cb (struct bufferevent *bev, short events, void *arg)
         fprintf(stdout, "[DEBUG] in function fg_event_client_cb: BEV_EVENT_CONNECTED\n");
         evutil_socket_t fd = bufferevent_getfd (bev);
         set_tcp_no_delay (fd);
-      } else if (events & BEV_EVENT_ERROR)
-      {
-        itdata->save_errno = errno;
-        report_error (itdata->error, "in function fg_event_client_cb");
-        itdata->cb (itdata->user_data, NULL, NULL);
       }
+    else if (events & BEV_EVENT_ERROR)
+        report_error (itdata, "in function fg_event_client_cb");
 }
 
 static void
@@ -199,9 +255,8 @@ fg_event_server_cb (struct bufferevent *bev, short events, void *arg)
 
     if (events & BEV_EVENT_ERROR)
       {     
-        itdata->save_errno = errno;
-        report_error (itdata->error, "in function fg_event_server_cb");
-        itdata->cb (itdata->user_data, NULL, NULL);
+        report_error (itdata, "in function fg_event_server_cb");
+        bufferevent_free (bev);
       }
     if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR))
       {
@@ -246,33 +301,26 @@ accept_error_cb (struct evconnlistener *listener, void *arg)
 int
 fg_send_event (struct bufferevent *bev, struct fgevent *fgev)
 {
+    ssize_t s;
     evutil_socket_t fd;
-    unsigned char *buffer;
-    struct evbuffer *output;
-    size_t nbytes;
-
-    nbytes = 2; // for STX and ETX delimiter
-    nbytes += sizeof (fgev->id);
-    nbytes += sizeof (fgev->writeback);
-    nbytes += sizeof (fgev->length);
-    if (fgev->length > 0)
-        nbytes += fgev->length * sizeof (fgev->payload[0]);
-    buffer = malloc (nbytes);
-    if (!buffer)
+    unsigned char *fgbuf;
+    
+    s = create_serialized_fgevent_buffer (&fgbuf, fgev);
+    if (s < 0)
+      {
+        report_error (itdata,
+                      "create_serialized_fgevent_buffer failed");
         return -1;
-
-    buffer[0] = 0x02; // STX
-    serialize_fgevent (buffer+1, fgev);
-    buffer[nbytes-1] = 0x03; // ETX
+      }
 
     output = bufferevent_get_output (bev);
     evbuffer_lock (output);
-    evbuffer_add (output, buffer, nbytes);
+    evbuffer_add (output, fgbuf, nbytes);
     fd = bufferevent_getfd (bev);
     evbuffer_write (output, fd);
     evbuffer_unlock (output);
 
-    free (buffer);
+    free (fgbuf);
 
     return 0;
 }
@@ -287,11 +335,7 @@ events_thread_server_start (void *param)
     itdata->base = event_base_new ();
     if (itdata->base == NULL)
       {
-        itdata->save_errno = 0;
-        snprintf (itdata->error, sizeof itdata->error,
-                  "fgevents: %s: %d: Could not create event base\n",
-                  __FILE__, __LINE__);
-        itdata->cb (itdata->user_data, NULL, NULL);     
+        report_error_noen (itdata, "Could not create event base");
         return NULL;
       }
 
@@ -307,13 +351,10 @@ events_thread_server_start (void *param)
                                                 sizeof (sin)); // LEV_OPT_CLOSE_ON_FREE
     if (itdata->listener == NULL)
       {
-        itdata->save_errno = 0;
-        snprintf (itdata->error, sizeof itdata->error,
-                  "fgevents: %s: %d: Could not create INET listener\n",
-                  __FILE__, __LINE__);
-        itdata->cb (itdata->user_data, NULL, NULL);   
+        report_error_noen ("Could not create inet listener");
         return NULL;
       }
+
     evconnlistener_set_error_cb (itdata->listener, &accept_error_cb);
 
     sem_post (&itdata->init_flag);
@@ -325,6 +366,7 @@ events_thread_server_start (void *param)
 static void *
 events_thread_client_start (void *param)
 {
+    ssize_t s;
     struct fg_events_data *itdata = param;
     struct sockaddr_in sin;
 
@@ -332,11 +374,7 @@ events_thread_client_start (void *param)
     itdata->base = event_base_new ();
     if (itdata->base == NULL)
       {
-        itdata->save_errno = 0;
-        snprintf (itdata->error, sizeof itdata->error,
-                  "fgevents: %s: %d: Could not create event base\n",
-                  __FILE__, __LINE__);
-        itdata->cb (itdata->user_data, NULL, NULL);     
+        report_error_noen (itdata, "Could not create event base");
         return NULL;
       }
 
@@ -352,15 +390,22 @@ events_thread_client_start (void *param)
         sin.sin_addr.s_addr = inet_addr (itdata->addr);
         sin.sin_port = htons (itdata->port);
 
-        if (bufferevent_socket_connect (itdata->bev, (struct sockaddr *) &sin,
-            sizeof (sin)) < 0)
+        s = bufferevent_socket_connect (itdata->bev, (struct sockaddr *) &sin,
+                                        sizeof (sin));
+
+        /*
+         * If bufferevent_socket_connect fails, the connection will not
+         * automatically be retired by libevent. We must tear down and
+         * recreate the socket. Libevent has already released the resources
+         *
+         * We could block this thread for five minutes and then retry again
+         * but this should not happen unless the core module on the master
+         * is not running.
+         */
+        if (s < 0)
           {
             bufferevent_free (itdata->bev);
-            itdata->save_errno = 0;
-            snprintf (itdata->error, sizeof itdata->error,
-                      "fgevents: %s: %d: bufferevent_socket_connect failed\n",
-                      __FILE__, __LINE__);
-            itdata->cb (itdata->user_data, NULL, NULL);     
+            report_error (itdata, "bufferevent_socket_connect failed");
             return NULL;
           }
       } else
