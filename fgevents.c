@@ -46,7 +46,6 @@
 #include <errno.h>
 
 #include <arpa/inet.h>
-#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -178,7 +177,6 @@ fg_event_client_cb (struct bufferevent *bev, short events, void *arg)
 
     if (events & BEV_EVENT_CONNECTED)
       {
-        fprintf(stdout, "[DEBUG] in function fg_event_client_cb: BEV_EVENT_CONNECTED");
         evutil_socket_t fd = bufferevent_getfd (bev);
         set_tcp_no_delay (fd);
       } else if (events & BEV_EVENT_ERROR)
@@ -201,10 +199,7 @@ fg_event_server_cb (struct bufferevent *bev, short events, void *arg)
         itdata->cb (itdata->user_data, NULL, NULL);
       }
     if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR))
-      {
-        fprintf(stdout, "[DEBUG] in function fg_event_client_cb: freeing event");
         bufferevent_free (bev);
-      }
 }
 
 static void
@@ -241,17 +236,35 @@ accept_error_cb (struct evconnlistener *listener, void *arg)
 }
 
 int
-fg_send_event (struct fg_events_data *etdata, struct fgevent *fgev)
+fg_send_event (struct bufferevent *bev, struct fgevent *fgev)
 {
-    ssize_t s;
-    uint64_t u;
+    evutil_socket_t fd;
+    unsigned char *buffer;
+    struct evbuffer *output;
+    size_t nbytes;
 
-    /* add to lstack and raise event on efd */
-
-    u = ~0ULL;
-    s = write (etdata->efd, &u, sizeof (uint64_t));
-    if (s < 0)
+    nbytes = 2; // for STX and ETX delimiter
+    nbytes += sizeof (fgev->id);
+    nbytes += sizeof (fgev->writeback);
+    nbytes += sizeof (fgev->length);
+    if (fgev->length > 0)
+        nbytes += fgev->length * sizeof (fgev->payload[0]);
+    buffer = malloc (nbytes);
+    if (!buffer)
         return -1;
+
+    buffer[0] = 0x02; // STX
+    serialize_fgevent (buffer+1, fgev);
+    buffer[nbytes-1] = 0x03; // ETX
+
+    output = bufferevent_get_output (bev);
+    evbuffer_lock (output);
+    evbuffer_add (output, buffer, nbytes);
+    fd = bufferevent_getfd (bev);
+    evbuffer_write (output, fd);
+    evbuffer_unlock (output);
+
+    free (buffer);
 
     return 0;
 }
@@ -302,111 +315,13 @@ events_thread_server_start (void *param)
     return NULL;
 }
 
-static void
-fg_client_event_loop (struct fg_events_data *etdata)
-{
-    while (1)
-      {
-        s = poll (etdata.poll_fds, 1, -1);
-
-        if (s < 0)
-          {
-            etdata->save_errno = errno;
-            snprintf (etdata->error, sizeof etdata->error,
-                      "fgevents: %s: %d: in events_thread_client_start poll failed\n",
-                      __FILE__, __LINE__);
-            etdata->cb (etdata->user_data, NULL, NULL);
-            break;
-          }
-        else if (poll_fds[0].revents & events)
-          {
-            unsigned char *buffer;
-            struct evbuffer *output;
-            struct fgevent *fgev;
-            size_t nbytes;
-            uint64_t u;
-
-            s = read (poll_fds[0].fd, &u, sizeof (uint64_t));
-            if (s < 0)
-                log_error ("read failed");
-
-            if (s == 0)
-                break;
-
-            while ((fgev = lstack_pop(&log_stack)) != NULL)
-              {
-                nbytes = 2; // for STX and ETX delimiter
-                nbytes += sizeof (fgev->id);
-                nbytes += sizeof (fgev->writeback);
-                nbytes += sizeof (fgev->length);
-
-                if (fgev->length > 0)
-                    nbytes += fgev->length * sizeof (fgev->payload[0]);
-
-                buffer = malloc (nbytes);
-
-                if (!buffer)
-                  {
-                    itdata->save_errno = errno;
-                    snprintf (etdata->error, sizeof etdata->error,
-                              "fgevents: %s: %d: in events_thread_client_start malloc failed\n",
-                              __FILE__, __LINE__);
-                    itdata->cb (etdata->user_data, NULL, NULL);
-                    continue;
-                  }
-
-                buffer[0] = 0x02; // STX
-                serialize_fgevent (buffer+1, fgev);
-                buffer[nbytes-1] = 0x03; // ETX        
-
-                output = bufferevent_get_output (bev);
-                evbuffer_lock (output);
-                evbuffer_add (output, buffer, nbytes);
-                evbuffer_unlock (output);
-
-                if (itdata->port > 0)
-                  {
-                    memset(&sin, 0, sizeof (sin));
-                    sin.sin_family = AF_INET;
-                    sin.sin_addr.s_addr = inet_addr (etdata->addr);
-                    sin.sin_port = htons (etdata->port);
-
-                    if (bufferevent_socket_connect (etdata->bev, (struct sockaddr *) &sin,
-                        sizeof (sin)) < 0)
-                      {
-                        bufferevent_free (etdata->bev);
-                        etdata->save_errno = 0;
-                        snprintf (etdata->error, sizeof etdata->error,
-                                  "fgevents: %s: %d: bufferevent_socket_connect failed\n",
-                                  __FILE__, __LINE__);
-                        etdata->cb (etdata->user_data, NULL, NULL);
-                        return NULL;
-                      }
-                  }
-                else
-                  {
-                    // TODO add support for unix sockets
-                  }
-
-                event_base_dispatch (etdata->base);
-                event_base_loopexit (etdata->base, NULL); 
-                bufferevent_free (etdata->bev);
-                free (buffer);
-              }
-          }
-      }
-}
-
 static void *
 events_thread_client_start (void *param)
 {
-    ssize_t s, events;
     struct fg_events_data *itdata = param;
     struct sockaddr_in sin;
-    struct pollfd poll_fds[1];
 
     evthread_use_pthreads ();
-    itdata->efd = eventfd ();
     itdata->base = event_base_new ();
     if (itdata->base == NULL)
       {
@@ -418,41 +333,53 @@ events_thread_client_start (void *param)
         return NULL;
       }
 
-    sem_post (&itdata->init_flag);
-
     itdata->bev = bufferevent_socket_new (itdata->base, -1, BEV_OPT_CLOSE_ON_FREE);
     evbuffer_enable_locking (bufferevent_get_output (itdata->bev), NULL);
-    bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb, param);
-    bufferevent_enable (itdata->bev, EV_READ | EV_WRITE);
+    bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb, NULL);
+    bufferevent_enable (itdata->bev, EV_READ | EV_WRITE);    
 
-    poll_fds[0].fd = itdata->efd;
-    poll_fds[0].revents = 0;
-    poll_fds[0].events = events = POLLIN | POLLPRI;
+    if (itdata->port > 0)
+      {
+        memset(&sin, 0, sizeof (sin));
+        sin.sin_family = AF_INET;
+        sin.sin_addr.s_addr = inet_addr (itdata->addr);
+        sin.sin_port = htons (itdata->port);
 
-    fg_client_event_loop (itdata);    
+        if (bufferevent_socket_connect (itdata->bev, (struct sockaddr *) &sin,
+            sizeof (sin)) < 0)
+          {
+            bufferevent_free (itdata->bev);
+            itdata->save_errno = 0;
+            snprintf (itdata->error, sizeof itdata->error,
+                      "fgevents: %s: %d: bufferevent_socket_connect failed\n",
+                      __FILE__, __LINE__);
+            itdata->cb (itdata->user_data, NULL, NULL);     
+            return NULL;
+          }
+      } else
+      {
+        // TODO add support for unix sockets
+      }
+
+    sem_post (&itdata->init_flag);
+    event_base_dispatch (itdata->base);
 
     return NULL;
 }
 
 int
 fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
-                       void *arg, uint16_t port, char *unix_path)
+                       uint16_t port, char *unix_path)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
-    etdata->user_data = arg;
     etdata->addr = unix_path;
     etdata->port = port;
 
-    s = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (s < 0)
-        return -1;
-    etdata->efd = s;
-
     sem_init (&etdata->init_flag, 0, 0);
-    s = pthread_create (&etdata->events_t, NULL, &events_thread_server_start,
+    s = pthread_create (etdata->events_t, NULL, &events_thread_server_start,
                         etdata);
     if (s != 0)
       {
@@ -467,24 +394,18 @@ fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
 
 int
 fg_events_client_init_inet (struct fg_events_data *etdata,
-                            fg_handle_event_cb cb, void *arg, char *inet_addr,
+                            fg_handle_event_cb cb, char *inet_addr,
                             uint16_t port)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
-    etdata->user_data = arg;
     etdata->addr = inet_addr;
     etdata->port = port;
 
-    s = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (s < 0)
-        return -1;
-    etdata->efd = s;
-
     sem_init (&etdata->init_flag, 0, 0);
-    s = pthread_create (&etdata->events_t, NULL, &events_thread_client_start,
+    s = pthread_create (etdata->events_t, NULL, &events_thread_client_start,
                         etdata);
     if (s != 0)
       {
@@ -499,31 +420,22 @@ fg_events_client_init_inet (struct fg_events_data *etdata,
 
 int
 fg_events_client_init_unix (struct fg_events_data *etdata,
-                            fg_handle_event_cb cb, void *arg, char *unix_path)
+                            fg_handle_event_cb cb, char *unix_path)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
-    etdata->user_data = arg;
     etdata->addr = unix_path;
     etdata->port = 0;
 
-    s = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (s < 0)
-        return -1;
-    etdata->efd = s;
-
-    sem_init (&etdata->init_flag, 0, 0);
-    s = pthread_create (&etdata->events_t, NULL, &events_thread_client_start,
+    s = pthread_create (etdata->events_t, NULL, &events_thread_client_start,
                         etdata);
     if (s != 0)
       {
         errno = s;
         return -1;
       }
-    sem_wait (&etdata->init_flag);
-    sem_destroy (&etdata->init_flag);
 
     return 0;
 }
@@ -534,22 +446,14 @@ fg_events_server_shutdown (struct fg_events_data *itdata)
     event_base_loopexit (itdata->base, NULL);
     evconnlistener_free (itdata->listener);
     event_base_free (itdata->base);    
-    pthread_join (itdata->events_t, NULL);
+    pthread_join (*itdata->events_t, NULL);
 }
 
 void
 fg_events_client_shutdown (struct fg_events_data *itdata)
-{    
-    ssize_t s;
-    uint64_t u;
-
-    /* add to lstack and raise event on efd */
-
-    u = 0;
-    s = write (etdata->efd, &u, sizeof (uint64_t));
-    if (s < 0)
-        pthread_cancel (itdata->events_t);
-
-    event_base_free (itdata->base);    
-    pthread_join (itdata->events_t, NULL);
+{
+    event_base_loopexit (itdata->base, NULL); 
+    event_base_free (itdata->base);
+    bufferevent_free (itdata->bev);
+    pthread_join (*itdata->events_t, NULL);
 }

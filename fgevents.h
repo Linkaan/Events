@@ -29,8 +29,6 @@
 #include <semaphore.h>
 #include <pthread.h>
 
-#include <sys/eventfd.h>
-
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
@@ -43,26 +41,24 @@ struct fg_events_data {
     struct event_base     *base;
     struct evconnlistener *listener;
     struct bufferevent    *bev;
-    pthread_t             events_t;
+    pthread_t             *events_t;
     fg_handle_event_cb    cb;
-    lstack_t              events_stack;
     sem_t                 init_flag;
     void                  *user_data;
     char                  *addr;
     uint16_t              port;
-    int                   efd;
     int                   save_errno;
     char                  error[512];     
 };
 
 /* Initialize libevent and add asynchronous event listener, register cb */
 extern int fg_events_server_init (struct fg_events_data *, fg_handle_event_cb,
-                                  void *, uint16_t, char *);
+                                  uint16_t, char *);
 extern int fg_events_client_init_inet (struct fg_events_data *,
-                                       fg_handle_event_cb, void *, char *,
+                                       fg_handle_event_cb, char *,
                                        uint16_t);
 extern int fg_events_client_init_unix (struct fg_events_data *,
-                                       fg_handle_event_cb, void *, char *);
+                                       fg_handle_event_cb, char *);
 
 /* Function to send event to server from client */
 extern int fg_send_event (struct bufferevent *, struct fgevent *);
