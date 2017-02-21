@@ -151,9 +151,12 @@ fg_read_cb (struct bufferevent *bev, void *arg)
             evbuffer_lock (bufferevent_get_output (bev));
             bufferevent_write (bev, buffer2, nbytes);
             evbuffer_unlock (bufferevent_get_output (bev));
+
             free (buffer2);
           }
-          free (fgev.payload);
+
+        if (fgev.length > 0)
+            free (fgev.payload);
       }
 
     free (buffer);
@@ -166,7 +169,8 @@ fg_write_cb (struct bufferevent *bev, void *arg)
 
     /* writeback flushed */
     if (evbuffer_get_length (output) == 0) {
-        bufferevent_free (bev);
+        //bufferevent_free (bev);
+        fprintf(stdout, "[DEBUG] in function fg_write_cb: writeback flushed\n");
     }
 }
 
@@ -177,6 +181,7 @@ fg_event_client_cb (struct bufferevent *bev, short events, void *arg)
 
     if (events & BEV_EVENT_CONNECTED)
       {
+        fprintf(stdout, "[DEBUG] in function fg_event_client_cb: BEV_EVENT_CONNECTED\n");
         evutil_socket_t fd = bufferevent_getfd (bev);
         set_tcp_no_delay (fd);
       } else if (events & BEV_EVENT_ERROR)
@@ -199,7 +204,10 @@ fg_event_server_cb (struct bufferevent *bev, short events, void *arg)
         itdata->cb (itdata->user_data, NULL, NULL);
       }
     if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR))
-        bufferevent_free (bev);
+      {
+        fprintf(stdout, "[DEBUG] in function fg_event_client_cb: freeing event (not actually)\n");
+        //bufferevent_free (bev);
+      }
 }
 
 static void
@@ -210,7 +218,7 @@ accept_conn_cb (struct evconnlistener *listener, evutil_socket_t fd,
     struct bufferevent *bev;
 
     base = evconnlistener_get_base (listener);
-    bev = bufferevent_socket_new (base, fd, BEV_OPT_CLOSE_ON_FREE);
+    bev = bufferevent_socket_new (base, fd, 0); // BEV_OPT_CLOSE_ON_FREE
     set_tcp_no_delay (fd);
     evbuffer_enable_locking (bufferevent_get_output (bev), NULL);
 
@@ -294,10 +302,9 @@ events_thread_server_start (void *param)
     sin.sin_port = htons (itdata->port);
 
     itdata->listener = evconnlistener_new_bind (itdata->base, &accept_conn_cb,
-                                                param, LEV_OPT_CLOSE_ON_FREE |
-                                                LEV_OPT_REUSEABLE, -1,
+                                                param, LEV_OPT_REUSEABLE, -1,
                                                 (struct sockaddr *) &sin,
-                                                sizeof (sin));
+                                                sizeof (sin)); // LEV_OPT_CLOSE_ON_FREE
     if (itdata->listener == NULL)
       {
         itdata->save_errno = 0;
@@ -333,10 +340,10 @@ events_thread_client_start (void *param)
         return NULL;
       }
 
-    itdata->bev = bufferevent_socket_new (itdata->base, -1, BEV_OPT_CLOSE_ON_FREE);
+    itdata->bev = bufferevent_socket_new (itdata->base, -1, 0); // BEV_OPT_CLOSE_ON_FREE
     evbuffer_enable_locking (bufferevent_get_output (itdata->bev), NULL);
-    bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb, NULL);
-    bufferevent_enable (itdata->bev, EV_READ | EV_WRITE);    
+    bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb, param);
+    bufferevent_enable (itdata->bev, EV_READ | EV_WRITE);
 
     if (itdata->port > 0)
       {
@@ -369,17 +376,18 @@ events_thread_client_start (void *param)
 
 int
 fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
-                       uint16_t port, char *unix_path)
+                       void *arg, uint16_t port, char *unix_path)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
+    etdata->user_data = arg;
     etdata->addr = unix_path;
     etdata->port = port;
 
     sem_init (&etdata->init_flag, 0, 0);
-    s = pthread_create (etdata->events_t, NULL, &events_thread_server_start,
+    s = pthread_create (&etdata->events_t, NULL, &events_thread_server_start,
                         etdata);
     if (s != 0)
       {
@@ -394,18 +402,19 @@ fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
 
 int
 fg_events_client_init_inet (struct fg_events_data *etdata,
-                            fg_handle_event_cb cb, char *inet_addr,
+                            fg_handle_event_cb cb, void *arg, char *inet_addr,
                             uint16_t port)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
+    etdata->user_data = arg;
     etdata->addr = inet_addr;
     etdata->port = port;
 
     sem_init (&etdata->init_flag, 0, 0);
-    s = pthread_create (etdata->events_t, NULL, &events_thread_client_start,
+    s = pthread_create (&etdata->events_t, NULL, &events_thread_client_start,
                         etdata);
     if (s != 0)
       {
@@ -420,22 +429,26 @@ fg_events_client_init_inet (struct fg_events_data *etdata,
 
 int
 fg_events_client_init_unix (struct fg_events_data *etdata,
-                            fg_handle_event_cb cb, char *unix_path)
+                            fg_handle_event_cb cb, void *arg, char *unix_path)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
+    etdata->user_data = arg;
     etdata->addr = unix_path;
     etdata->port = 0;
 
-    s = pthread_create (etdata->events_t, NULL, &events_thread_client_start,
+    sem_init (&etdata->init_flag, 0, 0);
+    s = pthread_create (&etdata->events_t, NULL, &events_thread_client_start,
                         etdata);
     if (s != 0)
       {
         errno = s;
         return -1;
       }
+    sem_wait (&etdata->init_flag);
+    sem_destroy (&etdata->init_flag);
 
     return 0;
 }
@@ -446,7 +459,7 @@ fg_events_server_shutdown (struct fg_events_data *itdata)
     event_base_loopexit (itdata->base, NULL);
     evconnlistener_free (itdata->listener);
     event_base_free (itdata->base);    
-    pthread_join (*itdata->events_t, NULL);
+    pthread_join (itdata->events_t, NULL);
 }
 
 void
@@ -455,5 +468,5 @@ fg_events_client_shutdown (struct fg_events_data *itdata)
     event_base_loopexit (itdata->base, NULL); 
     event_base_free (itdata->base);
     bufferevent_free (itdata->bev);
-    pthread_join (*itdata->events_t, NULL);
+    pthread_join (itdata->events_t, NULL);
 }

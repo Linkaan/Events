@@ -41,7 +41,7 @@ struct fg_events_data {
     struct event_base     *base;
     struct evconnlistener *listener;
     struct bufferevent    *bev;
-    pthread_t             *events_t;
+    pthread_t             events_t;
     fg_handle_event_cb    cb;
     sem_t                 init_flag;
     void                  *user_data;
@@ -53,12 +53,12 @@ struct fg_events_data {
 
 /* Initialize libevent and add asynchronous event listener, register cb */
 extern int fg_events_server_init (struct fg_events_data *, fg_handle_event_cb,
-                                  uint16_t, char *);
+                                  void *, uint16_t, char *);
 extern int fg_events_client_init_inet (struct fg_events_data *,
-                                       fg_handle_event_cb, char *,
+                                       fg_handle_event_cb, void *, char *,
                                        uint16_t);
 extern int fg_events_client_init_unix (struct fg_events_data *,
-                                       fg_handle_event_cb, char *);
+                                       fg_handle_event_cb, void *, char *);
 
 /* Function to send event to server from client */
 extern int fg_send_event (struct bufferevent *, struct fgevent *);
