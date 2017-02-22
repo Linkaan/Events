@@ -67,4 +67,9 @@ extern int fg_send_event (struct bufferevent *, struct fgevent *);
 extern void fg_events_server_shutdown (struct fg_events_data *);
 extern void fg_events_client_shutdown (struct fg_events_data *);
 
+/* Helper function to parse fgevent delimitted with STX and ETX
+   control characters */
+extern int fg_parse_fgevent (struct fgevent *, unsigned char *, size_t,
+                             unsigned char **);
+
 #endif /* _FGEVENTS_H_ */

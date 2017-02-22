@@ -96,40 +96,40 @@ static void set_tcp_no_delay (evutil_socket_t fd)
 static ssize_t
 copy_evbuffer_into_buffer (struct evbuffer *evbuf, unsigned char **buf)
 {
-    ssize_t len;
+    size_t len;
     unsigned char *buffer;
 
-    len = evbuffer_get_length (input);
+    len = evbuffer_get_length (evbuf);
     buffer = malloc (len);
     if (buffer == NULL)
         return -1;
 
-    evbuffer_copyout (input, buffer, len);
+    evbuffer_copyout (evbuf, buffer, len);
     *buf = buffer;
 
     return len;
 }
 
-/* Helper function to parse fgevent delimitted with STX and ETX
-   control characters */
-static int
-parse_fgevent (struct fgevent *fgev, unsigned char *buffer,
-               ssize_t len, unsigned char **p)
+int
+fg_parse_fgevent (struct fgevent *fgev, unsigned char *buffer,
+               size_t len, unsigned char **p)
 {
     int s;
     unsigned char *ptr = *p;
 
     while ((size_t)(ptr - buffer) < len && ptr[0] != 0x02) // STX
             ptr++;
+
+    // check if buffer is empty
     if ((size_t)(ptr - buffer) >= len)
-        break;
+        return 0;
 
     /* Deserialize fgevent to fgev struct. If it fails to allocate memory we
        increment by payload length */
     ptr = deserialize_fgevent (++ptr, fgev);
     s = fgev->length > 0 && !fgev->payload;
     if (s)
-        ptr += fgev.length * sizeof (fgev->payload[0]);
+        ptr += fgev->length * sizeof (fgev->payload[0]);
 
     while ((size_t)(ptr - buffer) < len && ptr[0] != 0x03) // ETX
         ptr++;
@@ -141,8 +141,7 @@ parse_fgevent (struct fgevent *fgev, unsigned char *buffer,
 static int
 create_serialized_fgevent_buffer (unsigned char **buf, struct fgevent *fgev)
 {
-    unsigned char *buffer;
-    struct evbuffer *output;
+    unsigned char *buffer;    
     size_t nbytes;
 
     nbytes = 2; // for STX and ETX delimiter
@@ -162,36 +161,41 @@ create_serialized_fgevent_buffer (unsigned char **buf, struct fgevent *fgev)
 
     *buf = buffer;
 
-    return 0;
+    return nbytes;
 }
 
 
 static void
 fg_read_cb (struct bufferevent *bev, void *arg)
 {
-    ssize_t len;
+    ssize_t s;
+    size_t len;
     unsigned char *buffer, *ptr;
     struct fg_events_data *itdata = arg;
 
-    len = copy_evbuffer_into_buffer (bufferevent_get_input (bev), &buffer);
-    if (len < 0)
+    s = copy_evbuffer_into_buffer (bufferevent_get_input (bev), &buffer);
+    if (s < 0)
       {
         report_error (itdata, "in function fg_read_cb malloc failed");
         return;
       }
+    len = s;
     
     ptr = buffer;
     while ((size_t)(ptr - buffer) < len)
-      {
-        ssize_t s;
+      {        
         struct fgevent fgev, ansev;
         int writeback;
 
-        s = parse_fgevent (&fgev, buffer, len, &ptr);
+        s = fg_parse_fgevent (&fgev, buffer, len, &ptr);
         if (s < 0)
           {
             report_error (itdata,
                           "in function fg_read_cb parse_fgevent failed");
+            continue;
+          }
+        else if (s == 0) // empty event
+          {
             continue;
           }
         
@@ -207,7 +211,7 @@ fg_read_cb (struct bufferevent *bev, void *arg)
             else
               {
                 evbuffer_lock (bufferevent_get_output (bev));
-                bufferevent_write (bev, fgbuf, nbytes);
+                bufferevent_write (bev, fgbuf, s);
                 evbuffer_unlock (bufferevent_get_output (bev));
 
                 free (fgbuf);
@@ -304,18 +308,15 @@ fg_send_event (struct bufferevent *bev, struct fgevent *fgev)
     ssize_t s;
     evutil_socket_t fd;
     unsigned char *fgbuf;
+    struct evbuffer *output;    
     
     s = create_serialized_fgevent_buffer (&fgbuf, fgev);
     if (s < 0)
-      {
-        report_error (itdata,
-                      "create_serialized_fgevent_buffer failed");
         return -1;
-      }
 
     output = bufferevent_get_output (bev);
     evbuffer_lock (output);
-    evbuffer_add (output, fgbuf, nbytes);
+    evbuffer_add (output, fgbuf, s);
     fd = bufferevent_getfd (bev);
     evbuffer_write (output, fd);
     evbuffer_unlock (output);
@@ -351,7 +352,7 @@ events_thread_server_start (void *param)
                                                 sizeof (sin)); // LEV_OPT_CLOSE_ON_FREE
     if (itdata->listener == NULL)
       {
-        report_error_noen ("Could not create inet listener");
+        report_error_noen (itdata, "Could not create inet listener");
         return NULL;
       }
 

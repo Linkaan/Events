@@ -28,14 +28,16 @@ VERSION := $(MAJOR).$(MINOR)
 
 INCLUDE ?= -I.
 LINKS ?= -L.
-CFLAGS := $(INCLUDE) -std=gnu11 -fPIC -g -Wall -Wextra -D _GNU_SOURCE
-LDFLAGS := $(LINKS) -lfg-serializer -levent -levent_pthreads -shared \
--Wl,-soname,lib$(NAME).so.$(MAJOR)
+CFLAGS := $(INCLUDE) -std=gnu11 -g -Wall -Wextra -D _GNU_SOURCE
+LIBS := -lfg-serializer -levent -levent_pthreads
+LDFLAGS := $(LINKS) $(LIBS) -shared -Wl,-soname,lib$(NAME).so.$(MAJOR)
 SOURCES := fgevents.c
 HEADERS := fgevents.h
 OBJECTS = $(SOURCES:.c=.o)
 
-all: $(SOURCES) lib$(NAME).so.$(VERSION)
+TESTS = $(patsubst test/%.c, test/%_test, $(wildcard test/*.c))
+
+all: $(SOURCES) lib$(NAME).so.$(VERSION) $(TESTS)
 
 lib$(NAME).so.$(VERSION): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
@@ -44,7 +46,10 @@ lib$(NAME).so.$(VERSION): $(OBJECTS)
     ifndef CC
 	$(error CC not set, please invoke with CC set to path of arm-rpi-linux-gnueabihf-gcc)
     endif
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) -c $< -o $@ $(CFLAGS) -fPIC
+
+$(TESTS): test/%_test : test/%.c
+	$(CC) -o $@ $^ $(CFLAGS) $(LINKS) $(LIBS) -lcrypto -lz -l$(NAME)
 
 .PHONY: clean
 
