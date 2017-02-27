@@ -279,16 +279,16 @@ main (void)
 
 	fg_events_client_init_inet (&client, &client_callback, &pass_test_sem, "127.0.0.1", server.port);
 
-	//fg_send_event (&client, &event1);
-	//fg_send_event (&client, &event2);
-	//fg_send_event (&client, &event3);
-	//fg_send_event (&client, &event4);
-	//fg_send_event (&client, &event5);
+	fg_send_event (&client, &event1);
+	fg_send_event (&client, &event2);
+	fg_send_event (&client, &event3);
+	fg_send_event (&client, &event4);
+	fg_send_event (&client, &event5);
 	fg_send_event (&client, &event6);
 
 	clock_gettime (CLOCK_REALTIME, &ts);
 
-	ts.tv_sec += 600;
+	ts.tv_sec += 1;
     s = sem_timedwait (&pass_test_sem, &ts);
     if (s < 0)
       {
