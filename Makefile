@@ -37,7 +37,7 @@ OBJECTS = $(SOURCES:.c=.o)
 
 TESTS = $(patsubst test/%.c, test/%_test, $(wildcard test/*.c))
 
-all: $(SOURCES) lib$(NAME).so.$(VERSION) $(TESTS)
+all: $(SOURCES) lib$(NAME).so.$(VERSION)
 
 lib$(NAME).so.$(VERSION): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
@@ -51,7 +51,9 @@ lib$(NAME).so.$(VERSION): $(OBJECTS)
 $(TESTS): test/%_test : test/%.c
 	$(CC) -o $@ $^ $(CFLAGS) -I. -L. $(LINKS) $(LIBS) -lcrypto -lz -l$(NAME)
 
-.PHONY: clean
+.PHONY: clean all_tests
+
+all_tests: $(TESTS)
 
 clean:
 	rm -f lib$(NAME).so* $(OBJECTS)

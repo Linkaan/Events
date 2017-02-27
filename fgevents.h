@@ -49,6 +49,7 @@ struct fg_events_data {
     llist                 bevs;
     fg_handle_event_cb    cb;
     sem_t                 init_flag;
+    bool                  running;
     bool                  sigpipe_pending;
     bool                  sigpipe_unblock;
     void                  *user_data;

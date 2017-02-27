@@ -320,8 +320,11 @@ fg_event_client_cb (struct bufferevent *bev, short events, void *arg)
     if (events & BEV_EVENT_ERROR)
         report_error (itdata, "in function fg_event_client_cb");
 
-    if (events & BEV_EVENT_EOF)
-        fprintf (stdout, "[DEBUG] in function fg_event_client_cb: BEV_EVENT_EOF\n");
+    if (events & (BEV_EVENT_ERROR | BEV_EVENT_EOF))
+      {
+        fprintf (stdout, "[DEBUG] in function fg_event_client_cb: freeing event\n");
+        event_base_loopexit (itdata->base, NULL);
+      }
 
     fprintf (stdout, "[DEBUG] client events is %d\n", events);
 }
@@ -334,11 +337,11 @@ fg_event_server_cb (struct bufferevent *bev, short events, void *arg)
     if (events & BEV_EVENT_ERROR)
       {     
         report_error (itdata, "in function fg_event_server_cb");
-        bufferevent_free (bev);
+        remove_bev (itdata, bev);
       }
-    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR))
+    if (events & BEV_EVENT_EOF)
       {
-        fprintf (stdout, "[DEBUG] in function fg_event_server_cb: freeing event (not actually)\n");
+        fprintf (stdout, "[DEBUG] in function fg_event_server_cb: got eof\n");
         //bufferevent_free (bev);
       }
 
@@ -359,6 +362,7 @@ static void
 remove_bev (struct fg_events_data *itdata, struct bufferevent *bev)
 {
     list_remove (&itdata->bevs, bev);
+    bufferevent_free (bev);
 }
 
 static void
@@ -427,7 +431,6 @@ events_thread_server_start (void *param)
     struct fg_events_data *itdata = param;
     struct bufferevent *bev;
     struct sockaddr_in sin, sss;
-    struct timeval one_sec;
 
     evthread_use_pthreads ();
     itdata->base = event_base_new ();
@@ -440,7 +443,7 @@ events_thread_server_start (void *param)
     /* TODO: also listen on UNIX socket */
     memset (&sin, 0, sizeof (sin));
     sin.sin_family = AF_INET;
-    sin.sin_addr.s_addr = htonl (0);//INADDR_ANY;
+    sin.sin_addr.s_addr = INADDR_ANY; //htonl (0);
     sin.sin_port = htons (itdata->port);
 
     itdata->listener = evconnlistener_new_bind (itdata->base, &accept_conn_cb,
@@ -464,11 +467,9 @@ events_thread_server_start (void *param)
         itdata->port = ntohs (sss.sin_port);
 
     /* Register event to be able to break out of event loop when raised */
-    one_sec.tv_sec = 1;
-    one_sec.tv_usec = 0;
     itdata->exev = event_new (itdata->base, -1, 0, fg_exit_cb,
                               itdata);
-    if (!itdata->exev || event_add (itdata->exev, &one_sec) < 0)
+    if (!itdata->exev || event_add (itdata->exev, NULL) < 0)
         report_error_noen (itdata, "Could not create/add exit event");
 
     sem_post (&itdata->init_flag);
@@ -491,7 +492,6 @@ events_thread_client_start (void *param)
     ssize_t s;
     struct fg_events_data *itdata = param;
     struct sockaddr_in sin;
-    struct timeval one_sec;
 
     evthread_use_pthreads ();
     itdata->base = event_base_new ();
@@ -501,53 +501,57 @@ events_thread_client_start (void *param)
         return NULL;
       }
 
-    itdata->bev = bufferevent_socket_new (itdata->base, -1, BEV_OPT_CLOSE_ON_FREE);
-    evbuffer_enable_locking (bufferevent_get_output (itdata->bev), NULL);
-    bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb, param);
-    bufferevent_enable (itdata->bev, EV_READ | EV_PERSIST | EV_WRITE);
-
-    if (itdata->port > 0)
-      {
-        memset(&sin, 0, sizeof (sin));
-        sin.sin_family = AF_INET;
-        sin.sin_addr.s_addr = htonl (0x7f000001);//inet_addr (itdata->addr);
-        sin.sin_port = htons (itdata->port);
-
-        s = bufferevent_socket_connect (itdata->bev, (struct sockaddr *) &sin,
-                                        sizeof (sin));
-
-        /*
-         * If bufferevent_socket_connect fails, the connection will not
-         * automatically be retired by libevent. We must tear down and
-         * recreate the socket. Libevent has already released the resources
-         *
-         * We could block this thread for five minutes and then retry again
-         * but this should not happen unless the core module on the master
-         * is not running.
-         */
-        if (s < 0)
-          {
-            bufferevent_free (itdata->bev);
-            report_error (itdata, "bufferevent_socket_connect failed");
-            return NULL;
-          }
-      } else
-      {
-        // TODO add support for unix sockets
-      }
-
     /* Register event to be able to break out of event loop when raised */
-    one_sec.tv_sec = 1;
-    one_sec.tv_usec = 0;
     itdata->exev = event_new (itdata->base, -1, 0, fg_exit_cb,
                               itdata);
-    if (!itdata->exev || event_add (itdata->exev, &one_sec) < 0)
+    if (!itdata->exev || event_add (itdata->exev, NULL) < 0)
         report_error_noen (itdata, "Could not create/add exit event");
 
-    sem_post (&itdata->init_flag);
-    event_base_dispatch (itdata->base);
+    itdata->running = true;
+    while (itdata->running)
+      {
+        itdata->bev = bufferevent_socket_new (itdata->base, -1,
+                                              BEV_OPT_CLOSE_ON_FREE);
+        evbuffer_enable_locking (bufferevent_get_output (itdata->bev), NULL);
+        bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb,
+                           param);
+        bufferevent_enable (itdata->bev, EV_READ | EV_PERSIST | EV_WRITE);
 
-    bufferevent_free (itdata->bev);
+        if (itdata->port > 0)
+          {
+            memset(&sin, 0, sizeof (sin));
+            sin.sin_family = AF_INET;
+            sin.sin_addr.s_addr = inet_addr (itdata->addr); // htonl (0x7f000001);
+            sin.sin_port = htons (itdata->port);
+
+            s = bufferevent_socket_connect (itdata->bev,
+                                            (struct sockaddr *) &sin,
+                                            sizeof (sin));
+
+            if (s < 0)
+              {
+                bufferevent_free (itdata->bev);
+                report_error (itdata, "bufferevent_socket_connect failed");
+
+                /* attempt to reconnect after 10 seconds */
+                usleep (10 * 1000 * 1000);
+                continue;
+              }
+          } else
+          {
+            // TODO add support for unix sockets
+          }
+
+        sem_post (&itdata->init_flag);
+        event_base_dispatch (itdata->base);
+
+        bufferevent_free (itdata->bev);
+
+        // wait 10 seconds before attempting to re-connect unless exitting
+        if (itdata->running)        
+            usleep (10 * 1000 * 1000);
+      }
+
     if (itdata->exev)
         event_free (itdata->exev);
     event_base_free (itdata->base);
@@ -639,7 +643,8 @@ fg_exit_cb (evutil_socket_t sig, short events, void *arg)
 {
     struct fg_events_data *itdata = arg;
 
-    event_base_loopexit (itdata->base, NULL);    
+    itdata->running = false;
+    event_base_loopexit (itdata->base, NULL);
 }
 
 void
