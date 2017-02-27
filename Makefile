@@ -29,10 +29,10 @@ VERSION := $(MAJOR).$(MINOR)
 INCLUDE ?= -I.
 LINKS ?= -L.
 CFLAGS := $(INCLUDE) -std=gnu11 -g -Wall -Wextra -D _GNU_SOURCE
-LIBS := -lfg-serializer -levent -levent_pthreads
+LIBS := -lfg-serializer -levent -levent_pthreads -lpthread
 LDFLAGS := $(LINKS) $(LIBS) -shared -Wl,-soname,lib$(NAME).so.$(MAJOR)
-SOURCES := fgevents.c
-HEADERS := fgevents.h
+SOURCES := fgevents.c list.c
+HEADERS := fgevents.h list.h
 OBJECTS = $(SOURCES:.c=.o)
 
 TESTS = $(patsubst test/%.c, test/%_test, $(wildcard test/*.c))
@@ -49,7 +49,7 @@ lib$(NAME).so.$(VERSION): $(OBJECTS)
 	$(CC) -c $< -o $@ $(CFLAGS) -fPIC
 
 $(TESTS): test/%_test : test/%.c
-	$(CC) -o $@ $^ $(CFLAGS) $(LINKS) $(LIBS) -lcrypto -lz -l$(NAME)
+	$(CC) -o $@ $^ $(CFLAGS) -I. -L. $(LINKS) $(LIBS) -lcrypto -lz -l$(NAME)
 
 .PHONY: clean
 

@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <semaphore.h>
 #include <pthread.h>
 
@@ -35,6 +36,8 @@
 
 #include <serializer.h>
 
+#include "list.h"
+
 typedef int (*fg_handle_event_cb)(void *, struct fgevent *, struct fgevent *);
 
 struct fg_events_data { 
@@ -42,8 +45,11 @@ struct fg_events_data {
     struct evconnlistener *listener;
     struct bufferevent    *bev;
     pthread_t             events_t;
+    llist                 bevs;
     fg_handle_event_cb    cb;
     sem_t                 init_flag;
+    bool                  sigpipe_pending;
+    bool                  sigpipe_unblock;
     void                  *user_data;
     char                  *addr;
     uint16_t              port;
@@ -61,7 +67,7 @@ extern int fg_events_client_init_unix (struct fg_events_data *,
                                        fg_handle_event_cb, void *, char *);
 
 /* Function to send event to server from client */
-extern int fg_send_event (struct bufferevent *, struct fgevent *);
+extern int fg_send_event (struct fg_events_data *, struct fgevent *);
 
 /* Tear down event loop and cleanup */
 extern void fg_events_server_shutdown (struct fg_events_data *);

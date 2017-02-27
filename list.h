@@ -1,6 +1,6 @@
 /*
- *  test_common.h
- *    Common header file for unit tests to share macros and defs
+ *  list.h
+ *    The names of functions callable from within lists
  *****************************************************************************
  *  This file is part of Fågelmataren, an embedded project created to learn
  *  Linux and C. See <https://github.com/Linkaan/Fagelmatare>
@@ -21,21 +21,17 @@
  *****************************************************************************
  */
 
-#include <fgevents.h>
+#ifndef _LIST_H_
+#define _LIST_H_
 
-#define LEN(x) sizeof(x)/sizeof(x[0])
+struct node {
+	struct node *next;
+	void *value;
+}
+typedef node* llist;
 
-/* Print to console with colored output using ANSI escape codes */
-#ifdef INTEGRATION_TEST
-#define TEST_STR "integration test"
-#else
-#define TEST_STR "unit test"
-#endif
+extern int list_insert (llist *, void *);
+extern int list_remove (llist *, void *);
+extern int list_pop (llist *, void **);
 
-#define PRINT_FAIL(m, ...)\
-		fprintf (stderr,\
-				 TEST_STR": %s : \x1b[31m"m" failed\x1b[0m\n", __FILE__, ##__VA_ARGS__)
-
-#define PRINT_SUCCESS(m, ...)\
-		fprintf (stdout,\
-				 TEST_STR": %s : \x1b[32m"m"\x1b[0m\n", __FILE__, ##__VA_ARGS__)
+#endif /* _LIST_H_ */

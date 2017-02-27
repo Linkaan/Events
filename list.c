@@ -1,6 +1,6 @@
 /*
- *  test_common.h
- *    Common header file for unit tests to share macros and defs
+ *  list.c
+ *    Simple implementation of linked list data structure
  *****************************************************************************
  *  This file is part of Fågelmataren, an embedded project created to learn
  *  Linux and C. See <https://github.com/Linkaan/Fagelmatare>
@@ -21,21 +21,55 @@
  *****************************************************************************
  */
 
-#include <fgevents.h>
+int list_insert (llist *head, void *value)
+{
+    while (*head)
+        head = &head[0]->next;
 
-#define LEN(x) sizeof(x)/sizeof(x[0])
+    *head = malloc (sizeof **head);
+    if (!*head)
+      	return -1;
 
-/* Print to console with colored output using ANSI escape codes */
-#ifdef INTEGRATION_TEST
-#define TEST_STR "integration test"
-#else
-#define TEST_STR "unit test"
-#endif
+    **head = (struct node){0, value};
+    return 0;
+}
 
-#define PRINT_FAIL(m, ...)\
-		fprintf (stderr,\
-				 TEST_STR": %s : \x1b[31m"m" failed\x1b[0m\n", __FILE__, ##__VA_ARGS__)
+int list_pop (llist *head, void **value)
+{	
+	struct node *next_head;
 
-#define PRINT_SUCCESS(m, ...)\
-		fprintf (stdout,\
-				 TEST_STR": %s : \x1b[32m"m"\x1b[0m\n", __FILE__, ##__VA_ARGS__)
+	if (*head == NULL)
+		return -1;
+
+	next_head = head[0]->next;
+	*value = head[0]->value;
+	free(*head);
+	*head = next_head;
+
+	return 0;
+}
+
+int list_remove (llist *head, void *value)
+{
+	struct node *prev, *curr;
+
+	if (*head == NULL)
+		return -1;
+
+	if (head[0]->value == value)
+		return list_pop (head);
+
+	prev = curr = head[0]->next;
+	while (curr)
+	  {
+	  	if (curr->value == value)
+	  	  {
+	  	  	prev->next = curr->next;
+	  	  	free (curr);
+	  	  	return 0;
+	  	  }
+	  	  prev = curr;
+	  	  curr = curr->next;
+	  }
+	return -1;
+}
