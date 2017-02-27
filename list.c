@@ -21,6 +21,11 @@
  *****************************************************************************
  */
 
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "list.h"
+
 int list_insert (llist *head, void *value)
 {
     while (*head)
@@ -40,9 +45,11 @@ int list_pop (llist *head, void **value)
 
 	if (*head == NULL)
 		return -1;
+	
+	if (value)
+		*value = head[0]->value;
 
 	next_head = head[0]->next;
-	*value = head[0]->value;
 	free(*head);
 	*head = next_head;
 
@@ -57,7 +64,7 @@ int list_remove (llist *head, void *value)
 		return -1;
 
 	if (head[0]->value == value)
-		return list_pop (head);
+		return list_pop (head, NULL);
 
 	prev = curr = head[0]->next;
 	while (curr)

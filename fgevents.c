@@ -60,6 +60,7 @@
 #include <serializer.h>
 
 #include "fgevents.h"
+#include "list.h"
 
 /* Temporary ugly log error macros before fgutil library is done */
 #define report_error(etdata, msg)\
@@ -88,6 +89,8 @@
 /* Forward declarations used in this file. */
 static void add_bev (struct fg_events_data *, struct bufferevent *);
 static void remove_bev (struct fg_events_data *, struct bufferevent *);
+
+static void fg_exit_cb (evutil_socket_t, short, void *);
 
 /* Helper function to set tcp no delay on socket to disable
    packet-accumulation delay */
@@ -128,10 +131,12 @@ restore_sigpipe (struct fg_events_data *etdata)
         sigemptyset (&pending);
         sigpending (&pending);
         if (sigismember (&pending, SIGPIPE))
-          {          
+          {
+            sigset_t mask;    
             static const struct timespec nowait = { 0, 0 };
 
-            sigtimedwait (0, NULL, &nowait);
+            sigemptyset (&mask);
+            sigtimedwait (&mask, NULL, &nowait);
           }
 
         if (etdata->sigpipe_unblock)
@@ -345,7 +350,7 @@ add_bev (struct fg_events_data *itdata, struct bufferevent *bev)
 {
     int s;
 
-    s = list_insert (itdata->bevs, bev);
+    s = list_insert (&itdata->bevs, bev);
     if (s != 0)
         report_error (itdata, "in function add_bev");
 }
@@ -353,7 +358,7 @@ add_bev (struct fg_events_data *itdata, struct bufferevent *bev)
 static void
 remove_bev (struct fg_events_data *itdata, struct bufferevent *bev)
 {
-    list_remove (itdata->bevs, bev);
+    list_remove (&itdata->bevs, bev);
 }
 
 static void
@@ -420,7 +425,9 @@ events_thread_server_start (void *param)
 {
     socklen_t len;
     struct fg_events_data *itdata = param;
+    struct bufferevent *bev;
     struct sockaddr_in sin, sss;
+    struct timeval one_sec;
 
     evthread_use_pthreads ();
     itdata->base = event_base_new ();
@@ -456,8 +463,24 @@ events_thread_server_start (void *param)
     else
         itdata->port = ntohs (sss.sin_port);
 
+    /* Register event to be able to break out of event loop when raised */
+    one_sec.tv_sec = 1;
+    one_sec.tv_usec = 0;
+    itdata->exev = event_new (itdata->base, -1, 0, fg_exit_cb,
+                              itdata);
+    if (!itdata->exev || event_add (itdata->exev, &one_sec) < 0)
+        report_error_noen (itdata, "Could not create/add exit event");
+
     sem_post (&itdata->init_flag);
     event_base_dispatch (itdata->base);
+
+    while (list_pop (&itdata->bevs, &bev) != -1)
+        bufferevent_free (bev);
+
+    evconnlistener_free (itdata->listener);
+    if (itdata->exev)
+        event_free (itdata->exev);    
+    event_base_free (itdata->base);
 
     return NULL;
 }
@@ -468,6 +491,7 @@ events_thread_client_start (void *param)
     ssize_t s;
     struct fg_events_data *itdata = param;
     struct sockaddr_in sin;
+    struct timeval one_sec;
 
     evthread_use_pthreads ();
     itdata->base = event_base_new ();
@@ -486,7 +510,7 @@ events_thread_client_start (void *param)
       {
         memset(&sin, 0, sizeof (sin));
         sin.sin_family = AF_INET;
-        sin.sin_addr.s_addr = htonl(0x7f000001);//inet_addr (itdata->addr);
+        sin.sin_addr.s_addr = htonl (0x7f000001);//inet_addr (itdata->addr);
         sin.sin_port = htons (itdata->port);
 
         s = bufferevent_socket_connect (itdata->bev, (struct sockaddr *) &sin,
@@ -512,8 +536,21 @@ events_thread_client_start (void *param)
         // TODO add support for unix sockets
       }
 
+    /* Register event to be able to break out of event loop when raised */
+    one_sec.tv_sec = 1;
+    one_sec.tv_usec = 0;
+    itdata->exev = event_new (itdata->base, -1, 0, fg_exit_cb,
+                              itdata);
+    if (!itdata->exev || event_add (itdata->exev, &one_sec) < 0)
+        report_error_noen (itdata, "Could not create/add exit event");
+
     sem_post (&itdata->init_flag);
     event_base_dispatch (itdata->base);
+
+    bufferevent_free (itdata->bev);
+    if (itdata->exev)
+        event_free (itdata->exev);
+    event_base_free (itdata->base);
 
     return NULL;
 }
@@ -526,7 +563,6 @@ fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
-    etdata->bevs = {0};
     etdata->user_data = arg;
     etdata->addr = unix_path;
     etdata->port = port;
@@ -598,23 +634,28 @@ fg_events_client_init_unix (struct fg_events_data *etdata,
     return 0;
 }
 
+static void
+fg_exit_cb (evutil_socket_t sig, short events, void *arg)
+{
+    struct fg_events_data *itdata = arg;
+
+    event_base_loopexit (itdata->base, NULL);    
+}
+
 void
 fg_events_server_shutdown (struct fg_events_data *itdata)
-{
-    struct bufferevent *bev;
-    while (list_pop (itdata->bevs, &bev) != -1)
-        bufferevent_free (bev);
-    evconnlistener_free (itdata->listener);
-    event_base_loopexit (itdata->base, NULL);    
-    event_base_free (itdata->base);    
-    pthread_join (itdata->events_t, NULL);
+{    
+    if (itdata->exev)
+      {
+        event_active (itdata->exev, EV_WRITE, 0);
+        pthread_join (itdata->events_t, NULL);
+      }
+    else
+        pthread_cancel (itdata->events_t);
 }
 
 void
 fg_events_client_shutdown (struct fg_events_data *itdata)
 {
-    bufferevent_free (itdata->bev);
-    event_base_loopexit (itdata->base, NULL); 
-    event_base_free (itdata->base);    
-    pthread_join (itdata->events_t, NULL);
+    fg_events_server_shutdown (itdata);
 }

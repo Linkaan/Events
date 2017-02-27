@@ -27,8 +27,8 @@
 struct node {
 	struct node *next;
 	void *value;
-}
-typedef node* llist;
+};
+typedef struct node* llist;
 
 extern int list_insert (llist *, void *);
 extern int list_remove (llist *, void *);
