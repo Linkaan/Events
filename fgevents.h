@@ -42,7 +42,8 @@ typedef int (*fg_handle_event_cb)(void *, struct fgevent *, struct fgevent *);
 
 struct fg_events_data { 
     struct event_base     *base;
-    struct evconnlistener *listener;
+    struct evconnlistener *listener_inet;
+    struct evconnlistener *listener_unix;
     struct bufferevent    *bev;
     struct event          *exev;
     pthread_t             events_t;
