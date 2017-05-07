@@ -4,17 +4,17 @@
  *  fgevents.c
  *    Routines for sending/receiving events between client and server The data
  *    is sent via events which are serialized and delimited with STX/ETX
- *    control characters. Preceding the ETX delimiter is a 2-byte checksum to
- *    verify the integrity of an event.
+ *    control characters.
 
  *    This is the layout of a serialized event:
  *    
  *      1 - STX
  *      4 - id
+ *      1 - sender
+ *      1 - receiver
  *      1 - writeback
  *      4 - length
- *      ? - payload
- *      2 - CRC-9
+ *      ? - payload      
  *      1 - ETX
  *      
  *****************************************************************************
@@ -89,8 +89,16 @@
         do { errno = en;report_error (etdata, msg); } while (0)
 
 /* Forward declarations used in this file. */
-static void add_bev (struct fg_events_data *, struct bufferevent *);
-static void remove_bev (struct fg_events_data *, struct bufferevent *);
+static void fg_handle_new_event (struct fg_events_data *,
+                                 struct bufferevent *, struct fgevent *);
+static int fg_send_event_bev (struct fg_events_data *, struct bufferevent *,
+                              struct fgevent *)
+static int fg_send_data_bev (struct fg_events_data *, struct bufferevent *,
+                             unsigned char *, size_t)
+
+static void add_client (struct client_t *, struct fg_events_data *,
+                        struct bufferevent *);
+static void remove_client (struct client_t *);
 
 static void client_event_loop (struct fg_events_data *);
 
@@ -108,6 +116,13 @@ static void set_tcp_no_delay (evutil_socket_t fd)
     int one = 1;
     setsockopt (fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 }
+
+/* Struct to carry around connection (client)-specific data. */
+struct client_t {
+    int8_t user_id;
+    struct bufferevent *bev;
+    struct fg_events_data *itdata;
+};
 
 /* Helper functions to suppress and restore SIGPIPE */
 
@@ -153,7 +168,6 @@ restore_sigpipe (struct fg_events_data *etdata)
             pthread_sigmask (SIG_UNBLOCK, 0, NULL);
       }
 }
-
 
 /* Helper function to allocate memory for buffer and copy evbuffer to it */
 static ssize_t
@@ -215,9 +229,7 @@ create_serialized_fgevent_buffer (unsigned char **buf, struct fgevent *fgev)
     size_t nbytes;
 
     nbytes = 2; // for STX and ETX delimiter
-    nbytes += sizeof (fgev->id);
-    nbytes += sizeof (fgev->writeback);
-    nbytes += sizeof (fgev->length);
+    nbytes += FGEVENT_HEADER_SIZE;
     if (fgev->length > 0)
         nbytes += fgev->length * sizeof (fgev->payload[0]);
 
@@ -251,57 +263,69 @@ fg_read_cb (struct bufferevent *bev, void *arg)
       }
     len = s;
     
-    ptr = buffer;
-    while ((size_t)(ptr - buffer) < len)
-      {        
-        struct fgevent fgev, ansev;
-        int writeback;
+    if (itdata->read_cb != NULL)
+      {
+        itdata->read_cb (buffer, s, itdata->user_data);
+      }
+    else
+      {
+        ptr = buffer;
+        while ((size_t)(ptr - buffer) < len)
+          {        
+            struct fgevent fgev;
+            int writeback;
 
-        s = fg_parse_fgevent (&fgev, buffer, len, &ptr);
-        if (s < 0)
-          {
-            report_error (itdata,
-                          "in function fg_read_cb parse_fgevent failed");
-            continue;
-          }
-        else if (s == 0) // empty event
-          {
-            continue;
-          }
-        
-        writeback = itdata->cb (itdata->user_data, &fgev, &ansev);
-        if (writeback)
-          {
-            unsigned char *fgbuf;
-
-            s = create_serialized_fgevent_buffer (&fgbuf, &ansev);
+            s = fg_parse_fgevent (&fgev, buffer, len, &ptr);
             if (s < 0)
-                report_error (itdata,
-                              "create_serialized_fgevent_buffer failed");
-            else
               {
-                struct evbuffer *output;
+                report_error (itdata,
+                              "in function fg_read_cb parse_fgevent failed");
+                continue;
+              }
+            else if (s == 0) // empty event
+              {
+                continue;
+              }
 
-                output = bufferevent_get_output (bev);
-                evbuffer_lock (output);
-                suppress_sigpipe (itdata);
-                s = bufferevent_write (bev, fgbuf, s);                
-                itdata->save_errno = errno;
-                restore_sigpipe (itdata);
-                evbuffer_unlock (output);
-
-                free (fgbuf);
-
-                if (s < 0)
-                    report_error (itdata, "bufferevent_write failed");
-              }        
+            fg_handle_new_event (itdata, bev, &fgev);
+            
+            if (fgev.length > 0)
+                free (fgev.payload);
           }
-
-        if (fgev.length > 0)
-            free (fgev.payload);
       }
 
     free (buffer);
+}
+
+static void
+fg_handle_new_event (struct fg_events_data *itdata, struct bufferevent *bev,
+                     struct fgevent *fgev)
+{
+    struct fgevent *ansev;
+
+    if (!itdata->is_server || fgev->receiver == itdata->user_id)
+      {
+        writeback = itdata->cb (itdata->user_data, &fgev, &ansev);
+        if (writeback)
+          {
+            if (fg_send_event_bev (itdata, bev, fgev) < 0)
+              {
+                report_error (itdata, "fg_send_event_bev failed");
+              }
+          }
+      }
+    else
+      {
+        // we are the server and should send the event to the receiver client
+        client_t client = get_client_by_user_id (itdata, fgev->receiver);
+        if (client == NULL)
+            return;
+
+        if (fg_send_event_bev (itdata, client->bev, fgev) < 0)
+          {
+            report_error (itdata, "fg_send_event_bev failed");
+          }
+      }
 }
 
 static void
@@ -342,12 +366,12 @@ fg_event_client_cb (struct bufferevent *bev, short events, void *arg)
 static void
 fg_event_server_cb (struct bufferevent *bev, short events, void *arg)
 {
-    struct fg_events_data *itdata = arg;
+    struct client_t *client = arg;
 
     if (events & BEV_EVENT_ERROR)
       {     
-        report_error (itdata, "in function fg_event_server_cb");
-        remove_bev (itdata, bev);
+        report_error (client->itdata, "in function fg_event_server_cb");
+        remove_client (client);
       }
     if (events & BEV_EVENT_EOF)
       {
@@ -358,21 +382,29 @@ fg_event_server_cb (struct bufferevent *bev, short events, void *arg)
     fprintf (stdout, "[DEBUG] server events is %d\n", events);
 }
 
-static void
-add_bev (struct fg_events_data *itdata, struct bufferevent *bev)
+static client_t
+get_client_by_user_id (struct fg_events_data *itdata, int8_t user_id)
 {
-    int s;
+
+}
+
+static void
+add_client (struct client_t *client, struct fg_events_data *itdata,
+            struct bufferevent *bev)
+{
+    /*int s;
 
     s = list_insert (&itdata->bevs, bev);
     if (s != 0)
         report_error (itdata, "in function add_bev");
+        */
 }
 
 static void
-remove_bev (struct fg_events_data *itdata, struct bufferevent *bev)
+remove_client (struct client_t *client)
 {
-    list_remove (&itdata->bevs, bev);
-    bufferevent_free (bev);
+    //list_remove (&itdata->bevs, bev);
+    //bufferevent_free (bev);
 }
 
 static void
@@ -381,15 +413,16 @@ accept_conn_cb (struct evconnlistener *listener, evutil_socket_t fd,
 {
     struct bufferevent *bev;
     struct event_base *base;
+    struct client_t client;
     struct fg_events_data *itdata = arg;
 
     base = evconnlistener_get_base (listener);
     bev = bufferevent_socket_new (base, fd, BEV_OPT_CLOSE_ON_FREE);
-    add_bev (itdata, bev);
+    add_client (client, itdata, bev);
     set_tcp_no_delay (fd);
     evbuffer_enable_locking (bufferevent_get_output (bev), NULL);
 
-    bufferevent_setcb (bev, fg_read_cb, fg_write_cb, fg_event_server_cb, arg);
+    bufferevent_setcb (bev, fg_read_cb, fg_write_cb, fg_event_server_cb, &client);
     bufferevent_enable (bev, EV_READ | EV_WRITE);
 }
 
@@ -410,27 +443,65 @@ accept_error_cb (struct evconnlistener *listener, void *arg)
     event_base_loopexit (base, NULL);
 }
 
-int
-fg_send_event (struct fg_events_data *etdata, struct fgevent *fgev)
+static int fg_send_connected_event (struct fg_events_data *etdata) {
+    struct fgevent fgev;
+
+    fgev.id = FG_CONNECTED;
+    fgev.sender = etdata->user_id;
+    fgev.receiver = 0;
+    fgev.writeback = 0; // could have a confirmed connection event
+    fgev.length = 0;
+
+    fg_send_event (etdata, &fgev);
+}
+
+static int
+fg_send_event_bev (struct fg_events_data *etdata, struct bufferevent *bev,
+                   struct fgevent *fgev)
 {
     ssize_t s;
-    unsigned char *fgbuf;
-    struct evbuffer *output;
+    unsigned char *fgbuf;    
     
     s = create_serialized_fgevent_buffer (&fgbuf, fgev);
     if (s < 0)
         return -1;
 
-    output = bufferevent_get_output (etdata->bev);
-    evbuffer_lock (output);
-    suppress_sigpipe (etdata);
-    s = bufferevent_write (etdata->bev, fgbuf, s);
-    restore_sigpipe (etdata);
-    evbuffer_unlock (output);
+    s = fg_send_data_bev (etdata, bev, fgbuf, s);    
 
     free (fgbuf);
 
     return s;
+}
+
+static int
+fg_send_data_bev (struct fg_events_data *itdata, struct bufferevent *bev,
+                  unsigned char *buf, size_t len)
+{
+    ssize_t s;
+    struct evbuffer *output;
+
+    output = bufferevent_get_output (bev);
+    evbuffer_lock (output);
+    suppress_sigpipe (itdata);
+    s = bufferevent_write (bev, buf, len);
+    itdata->save_errno = errno;
+    restore_sigpipe (itdata);
+    evbuffer_unlock (output);
+
+    return s;
+}
+
+int
+fg_send_event (struct fg_events_data *etdata, struct fgevent *fgev)
+{
+    fgev->sender = etdata->user_id;
+    return fg_send_event_bev (etdata, etdata->bev, fgev);
+}
+
+int
+fg_send_data (struct fg_events_data *etdata, unsigned char *buf, size_t len)
+{
+    return fg_send_data_bev (etdata, etdata->bev, buf, len);
 }
 
 static int
@@ -494,11 +565,11 @@ fg_events_server_setup_unix (struct fg_events_data *itdata,
                                          sizeof (sun));
     if (_listener == NULL)
       {
-        //report_error_en (itdata, EAGAIN, "Could not create unix listener");
+        report_error_en (itdata, EAGAIN, "Could not create unix listener");
         return -1;
       }
 
-    //evconnlistener_set_error_cb (_listener, &accept_error_cb);
+    evconnlistener_set_error_cb (_listener, &accept_error_cb);
 
     *listener = _listener;
 
@@ -510,7 +581,7 @@ events_thread_server_start (void *param)
 {
     int s;    
     struct fg_events_data *itdata = param;
-    struct bufferevent *bev;
+    struct client_t *client;
 
     evthread_use_pthreads ();
     itdata->base = event_base_new ();
@@ -548,8 +619,8 @@ events_thread_server_start (void *param)
     sem_post (&itdata->init_flag);
     event_base_dispatch (itdata->base);
 
-    while (list_pop (&itdata->bevs, &bev) != -1)
-        bufferevent_free (bev);
+    while (list_pop (&itdata->clients, &client) != -1)
+        bufferevent_free (client->bev);
 
     evconnlistener_free (itdata->listener_inet);
     evconnlistener_free (itdata->listener_unix);
@@ -612,8 +683,13 @@ client_event_loop (struct fg_events_data *itdata)
             usleep (10 * 1000 * 1000);
             continue;
           }
+        s = fg_send_connected_event (itdata);
+        if (s != 0)
+          {
+            report_error (itdata, "fg_send_connected_event failed");
+          }
 
-        sem_post (&itdata->init_flag);
+        sem_post (&itdata->init_flag);      
         event_base_dispatch (itdata->base);
 
         bufferevent_free (itdata->bev);
@@ -654,7 +730,8 @@ events_thread_client_start (void *param)
 
 int
 fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
-                       void *arg, uint16_t port, char *unix_path)
+                       void *arg, uint16_t port, char *unix_path,
+                       int8_t user_id)
 {
     ssize_t s;
 
@@ -663,6 +740,8 @@ fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
     etdata->user_data = arg;
     etdata->addr = unix_path;
     etdata->port = port;
+    etdata->is_server = true;
+    etdata->user_id = user_id;
 
     sem_init (&etdata->init_flag, 0, 0);
     s = pthread_create (&etdata->events_t, NULL, &events_thread_server_start,
@@ -681,15 +760,27 @@ fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
 int
 fg_events_client_init_inet (struct fg_events_data *etdata,
                             fg_handle_event_cb cb, void *arg, char *inet_addr,
-                            uint16_t port)
+                            uint16_t port, int8_t user_id)
+{
+    return fg_events_client_init_inet (etdata, cb, NULL, arg, inet_addr, port);
+}
+
+int
+fg_events_client_init_inet (struct fg_events_data *etdata,
+                            fg_handle_event_cb cb, fg_handle_read_cb read_cb,
+                            void *arg, char *inet_addr, uint16_t port,
+                            int8_t user_id)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
+    etdata->read_cb = read_cb;
     etdata->user_data = arg;
     etdata->addr = inet_addr;
     etdata->port = port;
+    etdata->is_server = false;
+    etdata->user_id = user_id;
 
     sem_init (&etdata->init_flag, 0, 0);
     s = pthread_create (&etdata->events_t, NULL, &events_thread_client_start,
@@ -707,15 +798,27 @@ fg_events_client_init_inet (struct fg_events_data *etdata,
 
 int
 fg_events_client_init_unix (struct fg_events_data *etdata,
-                            fg_handle_event_cb cb, void *arg, char *unix_path)
+                            fg_handle_event_cb cb, void *arg, char *unix_path,
+                            int8_t user_id)
+{
+    return fg_events_client_init_unix (etdata, cb, NULL, arg, unix_path);
+}
+
+int
+fg_events_client_init_unix (struct fg_events_data *etdata,
+                            fg_handle_event_cb cb, fg_handle_read_cb read_cb,
+                            void *arg, char *unix_path, int8_t user_id)
 {
     ssize_t s;
 
     memset (etdata, 0, sizeof (struct fg_events_data));
     etdata->cb = cb;
+    etdata->read_cb = read_cb;
     etdata->user_data = arg;
     etdata->addr = unix_path;
     etdata->port = 0;
+    etdata->is_server = false;
+    etdata->user_id = user_id;
 
     sem_init (&etdata->init_flag, 0, 0);
     s = pthread_create (&etdata->events_t, NULL, &events_thread_client_start,
