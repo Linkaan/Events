@@ -38,8 +38,33 @@
 
 #include "list.h"
 
+/* macro to supress unused parameter warnings */
+#ifdef UNUSED
+#elif defined(__GNUC__)
+# define UNUSED(x) UNUSED_ ## x __attribute__((unused))
+#else
+# define UNUSED(x) x
+#endif
+
 typedef int (*fg_handle_event_cb)(void *, struct fgevent *, struct fgevent *);
 typedef void (*fg_handle_read_cb)(unsigned char *, size_t, void *);
+
+enum client_status {
+    UNITIALIZED,
+    CONNECTED,
+    DISCONNECTED,
+    DROPPED
+};
+
+/* Struct to carry around connection (client)-specific data. */
+struct client_t {
+    int status;    
+    int8_t conn_id;
+    int8_t user_id;
+    uint8_t failed;
+    struct bufferevent *bev;
+    struct fg_events_data *itdata;    
+};
 
 /* Struct to carry around fg events library data. */
 struct fg_events_data { 
@@ -48,6 +73,7 @@ struct fg_events_data {
     struct evconnlistener *listener_unix;
     struct bufferevent    *bev;
     struct event          *exev;
+    struct event          *pingev;
     pthread_t             events_t;
     llist                 clients;
     fg_handle_event_cb    cb;
@@ -60,6 +86,7 @@ struct fg_events_data {
     void                  *user_data;
     char                  *addr;
     uint16_t              port;
+    int8_t                conn_id;
     int8_t                user_id;
     int                   save_errno;
     char                  error[512];     
@@ -72,12 +99,6 @@ extern int fg_events_server_init (struct fg_events_data *, fg_handle_event_cb,
 extern int fg_events_client_init_inet (struct fg_events_data *,
                                        fg_handle_event_cb, fg_handle_read_cb,
                                        void *, char *, uint16_t, int8_t);
-extern int fg_events_client_init_inet (struct fg_events_data *,
-                                       fg_handle_event_cb, void *, char *,
-                                       uint16_t, int8_t);
-extern int fg_events_client_init_unix (struct fg_events_data *,
-                                       fg_handle_event_cb, void *, char *,
-                                       int8_t);
 extern int fg_events_client_init_unix (struct fg_events_data *,
                                        fg_handle_event_cb, fg_handle_read_cb,
                                        void *, char *, int8_t);

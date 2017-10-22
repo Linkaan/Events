@@ -32,66 +32,64 @@
 #define INTEGRATION_TEST
 #include "test_common.h"
 
-#define EVENT1 1 << 1 
+#define EVENT1 ABI + 1
 int32_t payload1[] = {123, 456, 789, 123, 456};
-struct fgevent event1 = {EVENT1, 1, 5, &(payload1[0])};
+struct fgevent event1 = {EVENT1, 2, 1, 1, 5, &(payload1[0])};
 int32_t payload1_expected[] = {-123, -456, -789, -123, -456};
-struct fgevent event1_expected = {EVENT1, 0, 5, &(payload1_expected[0])};
+struct fgevent event1_expected = {EVENT1, 1, 2, 0, 5, &(payload1_expected[0])};
 
-#define EVENT2 1 << 2
+#define EVENT2 ABI + 2
 int32_t payload2[] = {0, 0, 0, 0, 0, 0};
-struct fgevent event2 = {EVENT2, 1, 6, &(payload2[0])};
+struct fgevent event2 = {EVENT2, 2, 1, 1, 6, &(payload2[0])};
 int32_t payload2_expected[] = {-1, 1, -1, 1, -1};
-struct fgevent event2_expected = {EVENT2, 0, 5, &(payload2_expected[0])};
+struct fgevent event2_expected = {EVENT2, 1, 2, 0, 5, &(payload2_expected[0])};
 
-#define EVENT3 1 << 3
+#define EVENT3 ABI + 3
 int32_t payload3[] = {0x01, 0x02, 0x03, 0x04, 0x05};
-struct fgevent event3 = {EVENT3, 1, 5, &(payload3[0])};
+struct fgevent event3 = {EVENT3, 2, 1, 1, 5, &(payload3[0])};
 int32_t payload3_expected[] = {-0x01, -0x02, -0x03, -0x04, -0x05};
-struct fgevent event3_expected = {EVENT3, 0, 5, &(payload3_expected[0])};
+struct fgevent event3_expected = {EVENT3, 1, 2, 0, 5, &(payload3_expected[0])};
 
-#define EVENT4 1 << 4
+#define EVENT4 ABI + 4
 int32_t payload4[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-struct fgevent event4 = {EVENT4, 1, 10, &(payload4[0])};
+struct fgevent event4 = {EVENT4, 2, 1, 1, 10, &(payload4[0])};
 int32_t payload4_expected[] = {~0};
-struct fgevent event4_expected = {EVENT4, 0, 1, &(payload4_expected[0])};
+struct fgevent event4_expected = {EVENT4, 1, 2, 0, 1, &(payload4_expected[0])};
 
-#define EVENT5 1 << 5
+#define EVENT5 ABI + 5
 int32_t payload5[] = {5, 5, 5, 5, 5};
-struct fgevent event5 = {EVENT5, 1, 5, &(payload5[0])};
-struct fgevent event5_expected = {EVENT5, 0, 0, NULL};
+struct fgevent event5 = {EVENT5, 2, 1, 1, 5, &(payload5[0])};
+struct fgevent event5_expected = {EVENT5, 1, 2, 0, 0, NULL};
 
-#define EVENT6 1 << 6
+#define EVENT6 ABI + 6
 int32_t payload6[] = {-123, -456, -789, -123, -456, -789};
-struct fgevent event6 = {EVENT6, 1, 5, &(payload6[0])};
+struct fgevent event6 = {EVENT6, 2, 1, 1, 6, &(payload6[0])};
 int32_t payload6_expected[] = {-123, -456, -789, -123, -456};
-struct fgevent event6_expected = {EVENT6, 0, 5, &(payload6_expected[0])};
+struct fgevent event6_expected = {EVENT6, 1, 2, 0, 5, &(payload6_expected[0])};
 
-#define EVENT7 1 << 7
+#define EVENT7 ABI + 7
 int32_t payload7[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
-struct fgevent event7 = {EVENT7, 1, 10, &(payload7[0])};
+struct fgevent event7 = {EVENT7, 3, 1, 1, 10, &(payload7[0])};
 int32_t payload7_expected[] = {2, 3, 4, 5};
-struct fgevent event7_expected = {EVENT7, 0, 4, &(payload7_expected[0])};
+struct fgevent event7_expected = {EVENT7, 1, 3, 0, 4, &(payload7_expected[0])};
 
-#define EVENT8 1 << 8
+#define EVENT8 ABI + 8
 int32_t payload8[] = {0x02, 0x02, 0x02, 0x02, 0x02};
-struct fgevent event8 = {EVENT8, 1, 5, &(payload8[0])};
-struct fgevent event8_expected = {EVENT8, 0, 0, NULL};
+struct fgevent event8 = {EVENT8, 3, 1, 1, 5, &(payload8[0])};
+struct fgevent event8_expected = {EVENT8, 1, 3, 0, 0, NULL};
 
-#define EVENT9 1 << 9
+#define EVENT9 ABI + 9
 int32_t payload9[] = {0x02, 0x02, 0x02, 0x02, 0x02, 0x02};
-struct fgevent event9 = {EVENT9, 1, 5, &(payload9[0])};
+struct fgevent event9 = {EVENT9, 3, 1, 1, 6, &(payload9[0])};
 int32_t payload9_expected[] = {0x02, 0x03, -0x03, 0x03, -0x03};
-struct fgevent event9_expected = {EVENT9, 0, 5, &(payload9_expected[0])};
-
+struct fgevent event9_expected = {EVENT9, 1, 3, 0, 5, &(payload9_expected[0])};
 
 static int
-server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
+server_callback (void * UNUSED(arg), struct fgevent *fgev,
+                 struct fgevent *ansev)
 {
     static int counter = 0;
-    int i;
-
-    counter++;
+    int i;    
 
     if (fgev == NULL)
       {
@@ -102,7 +100,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
     switch (fgev->id)
       {
         case EVENT1:
-            if (fgev->length != event1.length)
+            counter++;
+            if (fgev->length != event1.length ||
+                fgev->sender != event1.sender ||
+                fgev->receiver != event1.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -116,7 +117,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }   
             break;
         case EVENT2:
-            if (fgev->length != event2.length)
+            counter++;
+            if (fgev->length != event2.length ||
+                fgev->sender != event2.sender ||
+                fgev->receiver != event2.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -130,7 +134,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }                         
             break;
         case EVENT3:
-            if (fgev->length != event3.length)
+            counter++;
+            if (fgev->length != event3.length ||
+                fgev->sender != event3.sender ||
+                fgev->receiver != event3.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -144,7 +151,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }                         
             break;
         case EVENT4:
-            if (fgev->length != event4.length)
+            counter++;
+            if (fgev->length != event4.length ||
+                fgev->sender != event4.sender ||
+                fgev->receiver != event4.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -158,7 +168,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }                         
             break;
         case EVENT5:
-            if (fgev->length != event5.length)
+            counter++;
+            if (fgev->length != event5.length ||
+                fgev->sender != event5.sender ||
+                fgev->receiver != event5.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -172,7 +185,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }                         
             break;
         case EVENT6:
-            if (fgev->length != event6.length)
+            counter++;
+            if (fgev->length != event6.length ||
+                fgev->sender != event6.sender ||
+                fgev->receiver != event6.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -186,7 +202,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }                         
             break;
         case EVENT7:
-            if (fgev->length != event7.length)
+            counter++;
+            if (fgev->length != event7.length ||
+                fgev->sender != event7.sender ||
+                fgev->receiver != event7.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -200,7 +219,10 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }                         
             break;
         case EVENT8:
-            if (fgev->length != event8.length)
+            counter++;
+            if (fgev->length != event8.length ||
+                fgev->sender != event8.sender ||
+                fgev->receiver != event8.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -211,10 +233,13 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               {
                 memcpy (ansev, &event8_expected, sizeof (struct fgevent));
                 return 1;
-              }                         
+              }
             break;
         case EVENT9:
-            if (fgev->length != event9.length)
+            counter++;
+            if (fgev->length != event9.length ||
+                fgev->sender != event9.sender ||
+                fgev->receiver != event9.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -226,7 +251,11 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
                 memcpy (ansev, &event9_expected, sizeof (struct fgevent));
                 return 1;
               }                         
-            break;             
+            break;
+        case FG_CONNECTED:
+        case FG_ALIVE_CONFRIM:
+        case FG_DISCONNECTED:
+            break;           
         default:
             goto FAIL;
             break;                                                          
@@ -240,13 +269,12 @@ server_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
 }
 
 static int
-client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
+client_callback (void *arg, struct fgevent *fgev,
+                 struct fgevent * UNUSED(ansev))
 {
     static int counter = 0;
     int i;
-    sem_t *sem = arg;
-
-    counter++;
+    sem_t *sem = arg;    
 
     if (fgev == NULL)
       {
@@ -257,7 +285,10 @@ client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
     switch (fgev->id)
       {
         case EVENT1:
-            if (fgev->length != event1_expected.length)
+            counter++;
+            if (fgev->length != event1_expected.length ||
+                fgev->sender != event1_expected.sender ||
+                fgev->receiver != event1_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -266,7 +297,10 @@ client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }
             break;
         case EVENT2:
-            if (fgev->length != event2_expected.length)
+            counter++;
+            if (fgev->length != event2_expected.length ||
+                fgev->sender != event2_expected.sender ||
+                fgev->receiver != event2_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -275,7 +309,10 @@ client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }         
             break;
         case EVENT3:
-            if (fgev->length != event3_expected.length)
+            counter++;
+            if (fgev->length != event3_expected.length ||
+                fgev->sender != event3_expected.sender ||
+                fgev->receiver != event3_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -284,7 +321,10 @@ client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }         
             break;
         case EVENT4:
-            if (fgev->length != event4_expected.length)
+            counter++;
+            if (fgev->length != event4_expected.length ||
+                fgev->sender != event4_expected.sender ||
+                fgev->receiver != event4_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -293,7 +333,10 @@ client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }         
             break;
         case EVENT5:
-            if (fgev->length != event5_expected.length)
+            counter++;
+            if (fgev->length != event5_expected.length ||
+                fgev->sender != event5_expected.sender ||
+                fgev->receiver != event5_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -302,14 +345,20 @@ client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }         
             break;
         case EVENT6:
-            if (fgev->length != event6_expected.length)
+            counter++;
+            if (fgev->length != event6_expected.length ||
+                fgev->sender != event6_expected.sender ||
+                fgev->receiver != event6_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
                 if (fgev->payload[i] != event6_expected.payload[i])
                     goto FAIL;
               }
-            break; 
+            break;
+        case FG_CONFIRMED:
+        case FG_ALIVE:
+            break;
         default:
             goto FAIL;
             break;                                                          
@@ -326,13 +375,12 @@ client_callback (void *arg, struct fgevent *fgev, struct fgevent *ansev)
 }
 
 static int
-client_callback_unix (void *arg, struct fgevent *fgev, struct fgevent *ansev)
+client_callback_unix (void *arg, struct fgevent *fgev,
+                      struct fgevent * UNUSED(ansev))
 {
     static int counter = 6;
     int i;
-    sem_t *sem = arg;
-
-    counter++;
+    sem_t *sem = arg;    
 
     if (fgev == NULL)
       {
@@ -343,7 +391,10 @@ client_callback_unix (void *arg, struct fgevent *fgev, struct fgevent *ansev)
     switch (fgev->id)
       {
         case EVENT7:
-            if (fgev->length != event7_expected.length)
+            counter++;
+            if (fgev->length != event7_expected.length ||
+                fgev->sender != event7_expected.sender ||
+                fgev->receiver != event7_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -352,7 +403,10 @@ client_callback_unix (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }         
             break;
         case EVENT8:
-            if (fgev->length != event8_expected.length)
+            counter++;
+            if (fgev->length != event8_expected.length ||
+                fgev->sender != event8_expected.sender ||
+                fgev->receiver != event8_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
@@ -361,13 +415,19 @@ client_callback_unix (void *arg, struct fgevent *fgev, struct fgevent *ansev)
               }         
             break;
         case EVENT9:
-            if (fgev->length != event9_expected.length)
+            counter++;
+            if (fgev->length != event9_expected.length ||
+                fgev->sender != event9_expected.sender ||
+                fgev->receiver != event9_expected.receiver)
                 goto FAIL;
             for (i = 0; i < fgev->length; i++)
               {
                 if (fgev->payload[i] != event9_expected.payload[i])
                     goto FAIL;
               }              
+            break;
+        case FG_CONFIRMED:
+        case FG_ALIVE:
             break; 
         default:
             goto FAIL;
@@ -394,15 +454,15 @@ main (void)
 
     sem_init (&pass_test_sem, 0, 0);
     sem_init (&pass_test_sem_unix, 0, 0);
-    fg_events_server_init (&server, &server_callback, NULL, 0, "/tmp/clumped_events.sock");
+    fg_events_server_init (&server, &server_callback, NULL, 0, "/tmp/clumped_events.sock", 1);
 
-    fg_events_client_init_inet (&client, &client_callback, &pass_test_sem, "127.0.0.1", server.port);
+    fg_events_client_init_inet (&client, &client_callback, NULL, &pass_test_sem, "127.0.0.1", server.port, 2);
 
     fg_send_event (&client, &event1);
     fg_send_event (&client, &event2);
     fg_send_event (&client, &event3);
 
-    fg_events_client_init_unix (&client_unix, &client_callback_unix, &pass_test_sem_unix, server.addr);
+    fg_events_client_init_unix (&client_unix, &client_callback_unix, NULL, &pass_test_sem_unix, server.addr, 3);
 
     fg_send_event (&client_unix, &event7);
     fg_send_event (&client, &event4);

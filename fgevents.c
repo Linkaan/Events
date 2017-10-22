@@ -1,5 +1,5 @@
 /*
- *  fagelmatare-serializer
+ *  fagelmatare-events
  *    Library used for event-based communication between master and slave
  *  fgevents.c
  *    Routines for sending/receiving events between client and server The data
@@ -65,6 +65,7 @@
 #include "list.h"
 
 /* Temporary ugly log error macros before fgutil library is done */
+/* TODO: write fgutil library */
 #define report_error(etdata, msg)\
         do\
           {\
@@ -72,7 +73,7 @@
             snprintf (etdata->error, sizeof etdata->error,\
                       "fgevents: %s: %d: %s: %s\n",\
                       __FILE__, __LINE__, msg, strerror (errno));\
-            etdata->cb (itdata->user_data, NULL, NULL);\
+            etdata->cb (etdata->user_data, NULL, NULL);\
           } while (0)
 
 #define report_error_noen(etdata, msg)\
@@ -82,7 +83,7 @@
             snprintf (etdata->error, sizeof etdata->error,\
                       "fgevents: %s: %d: %s\n",\
                       __FILE__, __LINE__, msg);\
-            itdata->cb (itdata->user_data, NULL, NULL);\
+            etdata->cb (etdata->user_data, NULL, NULL);\
           } while (0)
 
 #define report_error_en(etdata, en, msg)\
@@ -91,13 +92,34 @@
 /* Forward declarations used in this file. */
 static void fg_handle_new_event (struct fg_events_data *,
                                  struct bufferevent *, struct fgevent *);
+static void fg_handle_new_conn_event (struct fg_events_data *,
+                                      struct bufferevent *, struct fgevent *);
+static void fg_handle_conn_confirm_event (struct fg_events_data *itdata,
+                                          struct bufferevent *bev,
+                                          struct fgevent *fgev);
+static void fg_send_offline_event (struct fg_events_data *,
+                                   struct bufferevent *, struct fgevent *);
+static void fg_handle_ping_event (struct fg_events_data *,
+                                  struct bufferevent *, struct fgevent *fgev);
+static void fg_handle_ping_confirmed_event (struct fg_events_data *,
+                                            struct fgevent *);
 static int fg_send_event_bev (struct fg_events_data *, struct bufferevent *,
-                              struct fgevent *)
+                              struct fgevent *);
 static int fg_send_data_bev (struct fg_events_data *, struct bufferevent *,
-                             unsigned char *, size_t)
+                             unsigned char *, size_t);
 
-static void add_client (struct client_t *, struct fg_events_data *,
-                        struct bufferevent *);
+static int fg_send_connected_event (struct fg_events_data *);
+static int fg_send_disconnected_event (struct fg_events_data *);
+static int fg_send_confirmed_event (struct fg_events_data *,
+                                    struct bufferevent *, int8_t);
+
+static struct client_t *get_client_by_user_id (struct fg_events_data *,
+                                               int8_t);
+static struct client_t *get_client_by_conn_id (struct fg_events_data *,
+                                               int8_t);
+
+static int add_client (struct fg_events_data *, struct bufferevent *,
+                       struct client_t **, int8_t);
 static void remove_client (struct client_t *);
 
 static void client_event_loop (struct fg_events_data *);
@@ -108,6 +130,7 @@ static int fg_events_server_setup_unix (struct fg_events_data *,
                                         struct evconnlistener **, char *);
 
 static void fg_exit_cb (evutil_socket_t, short, void *);
+static void fg_ping_cb (evutil_socket_t, short, void *);
 
 /* Helper function to set tcp no delay on socket to disable
    packet-accumulation delay */
@@ -116,13 +139,6 @@ static void set_tcp_no_delay (evutil_socket_t fd)
     int one = 1;
     setsockopt (fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 }
-
-/* Struct to carry around connection (client)-specific data. */
-struct client_t {
-    int8_t user_id;
-    struct bufferevent *bev;
-    struct fg_events_data *itdata;
-};
 
 /* Helper functions to suppress and restore SIGPIPE */
 
@@ -183,6 +199,8 @@ copy_evbuffer_into_buffer (struct evbuffer *evbuf, unsigned char **buf)
 
     evbuffer_copyout (evbuf, buffer, len);
     *buf = buffer;
+
+    evbuffer_drain (evbuf, len);
 
     return len;
 }
@@ -253,7 +271,8 @@ fg_read_cb (struct bufferevent *bev, void *arg)
     ssize_t s;
     size_t len;
     unsigned char *buffer, *ptr;
-    struct fg_events_data *itdata = arg;
+    struct client_t *holder = arg;
+    struct fg_events_data *itdata = holder->itdata;
 
     s = copy_evbuffer_into_buffer (bufferevent_get_input (bev), &buffer);
     if (s < 0)
@@ -273,7 +292,6 @@ fg_read_cb (struct bufferevent *bev, void *arg)
         while ((size_t)(ptr - buffer) < len)
           {        
             struct fgevent fgev;
-            int writeback;
 
             s = fg_parse_fgevent (&fgev, buffer, len, &ptr);
             if (s < 0)
@@ -301,43 +319,212 @@ static void
 fg_handle_new_event (struct fg_events_data *itdata, struct bufferevent *bev,
                      struct fgevent *fgev)
 {
-    struct fgevent *ansev;
+    struct fgevent ansev;
+    int writeback;
 
     if (!itdata->is_server || fgev->receiver == itdata->user_id)
       {
-        writeback = itdata->cb (itdata->user_data, &fgev, &ansev);
+        writeback = itdata->cb (itdata->user_data, fgev, &ansev);
         if (writeback)
           {
-            if (fg_send_event_bev (itdata, bev, fgev) < 0)
+            if (fg_send_event_bev (itdata, bev, &ansev) < 0)
+              {
+                report_error (itdata, "fg_send_event_bev failed");
+              }
+          }        
+        if (!itdata->is_server && fgev->id == FG_CONFIRMED)
+          {
+            fg_handle_conn_confirm_event (itdata, bev, fgev);
+          }
+        else if (!itdata->is_server && fgev->id == FG_ALIVE)
+          {
+            fg_handle_ping_event (itdata, bev, fgev);            
+          }
+      }
+    else
+      {
+        itdata->cb (itdata->user_data, fgev, &ansev);
+
+        // TODO: also check status of sender
+        
+        if (fgev->id == FG_ALIVE_CONFRIM)
+          {
+            fg_handle_ping_confirmed_event (itdata, fgev);
+          }
+        else if (fgev->id == FG_CONNECTED || fgev->id == FG_DISCONNECTED)
+          {
+            fg_handle_new_conn_event (itdata, bev, fgev);
+          }
+        else
+          {          
+            // we are the server and should send the event to the receiver client
+            struct client_t *client = get_client_by_user_id (itdata,
+                                                             fgev->receiver);
+            if (client == NULL)
+              {
+                  /* TODO: if sender requires writeback, send back a FG_NO_SUCH_USER
+                    event */
+                  return;
+              }
+
+            if (client->status != CONNECTED)
+              {
+                  fg_send_offline_event (itdata, bev, fgev);
+                  return;
+              }
+
+            if (fg_send_event_bev (itdata, client->bev, fgev) < 0)
               {
                 report_error (itdata, "fg_send_event_bev failed");
               }
           }
       }
-    else
-      {
-        // we are the server and should send the event to the receiver client
-        client_t client = get_client_by_user_id (itdata, fgev->receiver);
-        if (client == NULL)
-            return;
+}
 
-        if (fg_send_event_bev (itdata, client->bev, fgev) < 0)
+static void
+fg_handle_new_conn_event (struct fg_events_data *itdata,
+                          struct bufferevent * UNUSED(bev),
+                          struct fgevent *fgev)
+{
+    if (fgev->id == FG_CONNECTED)
+      {
+        struct client_t *client = get_client_by_user_id (itdata,
+                                                         fgev->sender);
+        if (client != NULL)
           {
-            report_error (itdata, "fg_send_event_bev failed");
+            if (client->status != CONNECTED)
+              {
+                remove_client (client);
+              }
+            else
+              {
+                report_error_noen (client->itdata,
+                                   "in function fg_handle_new_conn_event connection denied");
+                /* TODO: if sender requires writeback, send back a
+                   FG_CONN_DENIED event */
+                return;
+              }            
           }
+
+        client = get_client_by_conn_id (itdata, fgev->payload[0]);
+        if (client == NULL)
+          {
+            /* TODO: if sender requires writeback, send back a
+               FG_NO_SUCH_USER event */
+            return;
+          }
+
+        client->user_id = fgev->sender;
+        client->conn_id = -1;
+        client->status = CONNECTED;
+      }
+    else if (fgev->id == FG_DISCONNECTED)
+      {
+        struct client_t *client = get_client_by_user_id (itdata,
+                                                         fgev->sender);
+        if (client == NULL)
+          {
+            /* TODO: if sender requires writeback, send back a
+               FG_NO_SUCH_USER event */
+            return;
+          }
+
+        client->status = DISCONNECTED;
       }
 }
 
 static void
-fg_write_cb (struct bufferevent *bev, void *arg)
+fg_handle_conn_confirm_event (struct fg_events_data *itdata,
+                              struct bufferevent *bev, struct fgevent *fgev)
 {
-    struct evbuffer *output = bufferevent_get_output (bev);
+    ssize_t s;
+
+    if (fgev->id != FG_CONFIRMED)
+      {
+        report_error_noen (itdata,
+                   "in function fg_handle_conn_confirm_event invalid event id");
+        return;
+      }
+
+    if (bev != itdata->bev)
+      {
+        report_error_noen (itdata,
+                   "in function fg_handle_conn_confirm_event invalid bev");
+        return; 
+      }
+
+    itdata->conn_id = fgev->payload[0];
+
+    s = fg_send_connected_event (itdata);
+    if (s != 0)
+      {
+        report_error (itdata, "fg_send_connected_event failed");
+      }
+
+    sem_post (&itdata->init_flag); /* TODO: set status to CONNECTED */
+}
+
+static void
+fg_handle_ping_confirmed_event (struct fg_events_data *itdata,
+                                struct fgevent *fgev)
+{
+  struct client_t *sender = get_client_by_user_id (itdata, fgev->sender);
+  if (sender == NULL)
+    {
+      fprintf(stdout, "[DEBUG] in function fg_handle_new_event: no such user\n");
+      return;
+    }
+
+  sender->failed = 0;
+}
+
+static void
+fg_send_offline_event (struct fg_events_data *itdata, struct bufferevent *bev,
+                       struct fgevent *fgev)
+{
+    struct fgevent ansev;
+
+    ansev.id = FG_USER_OFFLINE;
+    ansev.sender = itdata->user_id;
+    ansev.receiver = fgev->sender;
+    ansev.length = 0;
+    if (fg_send_event_bev (itdata, bev, &ansev) < 0)
+      {
+        report_error (itdata, "fg_send_event_bev failed");
+      }
+}                            
+
+static void
+fg_handle_ping_event (struct fg_events_data *itdata, struct bufferevent *bev,
+                      struct fgevent *fgev)
+{
+    struct fgevent ansev;
+
+    ansev.id = FG_ALIVE_CONFRIM;
+    ansev.sender = fgev->receiver;
+    ansev.receiver = 0;
+    ansev.length = 0;
+    if (fg_send_event_bev (itdata, bev, &ansev) < 0)
+      {
+        report_error (itdata, "fg_send_event_bev failed");
+      }
+}                      
+
+static void
+fg_write_cb (struct bufferevent *bev, void * UNUSED(arg))
+{
+    //struct evbuffer *output = bufferevent_get_output (bev);
+
+    bufferevent_flush (bev, EV_WRITE, BEV_FLUSH);
 
     /* writeback flushed */
-    if (evbuffer_get_length (output) == 0) {
+    /*
+    if (evbuffer_get_length (output) == 0)
+      {
         //bufferevent_free (bev);
-        fprintf(stdout, "[DEBUG] in function fg_write_cb: writeback flushed\n");
-    }
+        //fprintf(stdout, "[DEBUG] in function fg_write_cb: writeback flushed\n");
+      }
+      */
 }
 
 static void
@@ -364,66 +551,134 @@ fg_event_client_cb (struct bufferevent *bev, short events, void *arg)
 }
 
 static void
-fg_event_server_cb (struct bufferevent *bev, short events, void *arg)
+fg_event_server_cb (struct bufferevent * UNUSED(bev), short events, void *arg)
 {
     struct client_t *client = arg;
 
     if (events & BEV_EVENT_ERROR)
-      {     
-        report_error (client->itdata, "in function fg_event_server_cb");
+      {
+        report_error (client->itdata, "in function fg_event_server_cb");        
         remove_client (client);
       }
     if (events & BEV_EVENT_EOF)
       {
-        fprintf (stdout, "[DEBUG] in function fg_event_server_cb: got eof\n");
-        //bufferevent_free (bev);
+        fprintf (stdout, "[DEBUG] in function fg_event_server_cb: got eof from %d\n", client->user_id);        
+        remove_client (client);
       }
 
     fprintf (stdout, "[DEBUG] server events is %d\n", events);
 }
 
-static client_t
+static struct client_t *
 get_client_by_user_id (struct fg_events_data *itdata, int8_t user_id)
 {
-
+    /* NOTE: for a more scalable implementation, an associative array with the
+       user_id as the key would be preferable */
+    for (struct node *cur_head = itdata->clients;
+         cur_head != NULL;
+         cur_head = cur_head->next)
+      {
+        struct client_t *client = cur_head->value;
+        if (client->user_id == user_id)
+          {
+            return client;
+          }
+      }
+    return NULL;
 }
 
-static void
-add_client (struct client_t *client, struct fg_events_data *itdata,
-            struct bufferevent *bev)
+static struct client_t *
+get_client_by_conn_id (struct fg_events_data *itdata, int8_t conn_id)
 {
-    /*int s;
+    for (struct node *cur_head = itdata->clients;
+         cur_head != NULL;
+         cur_head = cur_head->next)
+      {
+        struct client_t *client = cur_head->value;
+        if (client->conn_id == conn_id)
+          {
+            return cur_head->value;
+          }
+      }
+    return NULL;
+}
 
-    s = list_insert (&itdata->bevs, bev);
+static int
+add_client (struct fg_events_data *itdata, struct bufferevent *bev,
+            struct client_t **holder, int8_t conn_id)
+{
+    int s;
+
+    struct client_t *client = malloc (sizeof (struct client_t));
+    if (client == NULL)
+      {
+        report_error (itdata, "in function add_client malloc failed");
+        return -1;
+      }
+
+    memset (client, 0, sizeof (struct client_t));
+
+    client->status = UNITIALIZED;
+    client->conn_id = conn_id;
+    client->user_id = -1;
+    client->itdata = itdata;
+    client->bev = bev;
+
+    s = list_insert (&itdata->clients, client);
     if (s != 0)
-        report_error (itdata, "in function add_bev");
-        */
+      {
+        report_error (itdata, "in function add_client");
+        return -1;
+      }
+
+    *holder = client;
+
+    return 0;
 }
 
 static void
 remove_client (struct client_t *client)
 {
-    //list_remove (&itdata->bevs, bev);
-    //bufferevent_free (bev);
+    int s;
+
+    s = list_remove (&client->itdata->clients, client);
+    if (s != 0)
+      {
+        report_error (client->itdata, "in function remove_client");
+      }
+
+    bufferevent_free (client->bev);
 }
 
 static void
 accept_conn_cb (struct evconnlistener *listener, evutil_socket_t fd,
-    struct sockaddr *address, int socklen, void *arg)
+                struct sockaddr * UNUSED(address), int UNUSED(socklen),
+                void *arg)
 {
+    static int8_t conn_tot = 0;
+    int s;
     struct bufferevent *bev;
     struct event_base *base;
-    struct client_t client;
+    struct client_t *client;
     struct fg_events_data *itdata = arg;
 
     base = evconnlistener_get_base (listener);
     bev = bufferevent_socket_new (base, fd, BEV_OPT_CLOSE_ON_FREE);
-    add_client (client, itdata, bev);
+    s = add_client (itdata, bev, &client, conn_tot);
     set_tcp_no_delay (fd);
     evbuffer_enable_locking (bufferevent_get_output (bev), NULL);
 
-    bufferevent_setcb (bev, fg_read_cb, fg_write_cb, fg_event_server_cb, &client);
-    bufferevent_enable (bev, EV_READ | EV_WRITE);
+    if (s == 0)
+      {
+        bufferevent_setcb (bev, fg_read_cb, fg_write_cb, fg_event_server_cb, client);
+        bufferevent_enable (bev, EV_READ | EV_WRITE);
+
+        fg_send_confirmed_event (itdata, bev, conn_tot++);
+      }
+    else
+      {
+        // TODO: send connection failed event
+      }
 }
 
 static void
@@ -443,16 +698,69 @@ accept_error_cb (struct evconnlistener *listener, void *arg)
     event_base_loopexit (base, NULL);
 }
 
-static int fg_send_connected_event (struct fg_events_data *etdata) {
+static int
+fg_send_connected_event (struct fg_events_data *etdata)
+{
     struct fgevent fgev;
 
+    int32_t conn_id_payload = (int32_t) etdata->conn_id;
     fgev.id = FG_CONNECTED;
     fgev.sender = etdata->user_id;
     fgev.receiver = 0;
-    fgev.writeback = 0; // could have a confirmed connection event
+    fgev.writeback = 0;
+    fgev.length = 1;
+    fgev.payload = &conn_id_payload;
+
+    if (fg_send_event (etdata, &fgev) < 0)
+      {
+        report_error (etdata, "fg_send_connected_event failed");
+        return -1;
+      }
+
+    return 0;
+}
+
+static int
+fg_send_confirmed_event (struct fg_events_data *etdata,
+                         struct bufferevent *bev, int8_t conn_id)
+{
+    struct fgevent fgev;
+
+    int32_t conn_id_payload = (int32_t) conn_id;
+    fgev.id = FG_CONFIRMED;
+    fgev.sender = etdata->user_id;
+    fgev.receiver = 0;
+    fgev.writeback = 1;
+    fgev.length = 1;
+    fgev.payload = &conn_id_payload;
+
+    if (fg_send_event_bev (etdata, bev, &fgev) < 0)
+      {
+        report_error (etdata, "fg_send_confirmed_event failed");
+        return -1;
+      }
+
+    return 0;
+}
+
+static int
+fg_send_disconnected_event (struct fg_events_data *etdata)
+{
+    struct fgevent fgev;
+
+    fgev.id = FG_DISCONNECTED;
+    fgev.sender = etdata->user_id;
+    fgev.receiver = 0;
+    fgev.writeback = 0;
     fgev.length = 0;
 
-    fg_send_event (etdata, &fgev);
+    if (fg_send_event (etdata, &fgev) < 0)
+      {
+        report_error (etdata, "fg_send_connected_event failed");
+        return -1;
+      }
+
+    return 0;
 }
 
 static int
@@ -494,7 +802,13 @@ fg_send_data_bev (struct fg_events_data *itdata, struct bufferevent *bev,
 int
 fg_send_event (struct fg_events_data *etdata, struct fgevent *fgev)
 {
+    static int temp_count = 0;
+    // TODO: if we are the server, send the event to ourself
     fgev->sender = etdata->user_id;
+    if (fgev->sender == 2 && fgev->id == 2 && ++temp_count == 2) {
+      printf("should not get here\n");
+    }
+    //printf("%d sent %d\n", fgev->sender, fgev->id);
     return fg_send_event_bev (etdata, etdata->bev, fgev);
 }
 
@@ -579,9 +893,11 @@ fg_events_server_setup_unix (struct fg_events_data *itdata,
 static void *
 events_thread_server_start (void *param)
 {
-    int s;    
+    int s;
+    struct timeval pinginterval = { 1, 0 }; // ping clients every 1 seconds
     struct fg_events_data *itdata = param;
     struct client_t *client;
+    void *client_pointer;
 
     evthread_use_pthreads ();
     itdata->base = event_base_new ();
@@ -608,7 +924,7 @@ events_thread_server_start (void *param)
         evconnlistener_free (itdata->listener_inet);        
         event_base_free (itdata->base);
         sem_post (&itdata->init_flag);
-        return NULL;      
+        return NULL;
       }
 
     /* Register event to be able to break out of event loop when raised */
@@ -616,16 +932,26 @@ events_thread_server_start (void *param)
     if (!itdata->exev || event_add (itdata->exev, NULL) < 0)
         report_error_noen (itdata, "Could not create/add exit event");
 
+    itdata->pingev = event_new (itdata->base, -1, EV_PERSIST, fg_ping_cb,
+                                itdata);
+    if (!itdata->pingev || event_add (itdata->pingev, &pinginterval) < 0)
+        report_error_noen (itdata, "Could not create/add ping event");
+
     sem_post (&itdata->init_flag);
     event_base_dispatch (itdata->base);
 
-    while (list_pop (&itdata->clients, &client) != -1)
+    while (list_pop (&itdata->clients, &client_pointer) != -1)
+      {
+        client = client_pointer;
         bufferevent_free (client->bev);
+      }
 
     evconnlistener_free (itdata->listener_inet);
     evconnlistener_free (itdata->listener_unix);
     if (itdata->exev)
-        event_free (itdata->exev);    
+        event_free (itdata->exev);
+    if (itdata->pingev)
+        event_free (itdata->pingev);
     event_base_free (itdata->base);
 
     return NULL;
@@ -641,14 +967,18 @@ client_event_loop (struct fg_events_data *itdata)
         struct sockaddr_in sin;
         struct sockaddr_un sun;
         struct sockaddr *saddr;
+        struct client_t holder;
+
+        memset (&holder, 0, sizeof (struct client_t));
+        holder.itdata = itdata;
 
         itdata->bev = bufferevent_socket_new (itdata->base, -1,
                                               BEV_OPT_CLOSE_ON_FREE);
         evbuffer_enable_locking (bufferevent_get_output (itdata->bev), NULL);
         bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb,
-                           itdata);
+                           &holder);
         bufferevent_enable (itdata->bev, EV_READ | EV_PERSIST | EV_WRITE);
-        
+        /* TODO: set status to DISCONNECTED */
         if (itdata->port > 0)
           {
             /* connect via inet sockets */
@@ -683,17 +1013,11 @@ client_event_loop (struct fg_events_data *itdata)
             usleep (10 * 1000 * 1000);
             continue;
           }
-        s = fg_send_connected_event (itdata);
-        if (s != 0)
-          {
-            report_error (itdata, "fg_send_connected_event failed");
-          }
 
-        sem_post (&itdata->init_flag);      
         event_base_dispatch (itdata->base);
 
         bufferevent_free (itdata->bev);
-
+        /* TODO: set status to DISCONNECTED */
         // wait 10 seconds before attempting to re-connect unless exitting
         if (itdata->running)        
             usleep (10 * 1000 * 1000);
@@ -759,14 +1083,6 @@ fg_events_server_init (struct fg_events_data *etdata, fg_handle_event_cb cb,
 
 int
 fg_events_client_init_inet (struct fg_events_data *etdata,
-                            fg_handle_event_cb cb, void *arg, char *inet_addr,
-                            uint16_t port, int8_t user_id)
-{
-    return fg_events_client_init_inet (etdata, cb, NULL, arg, inet_addr, port);
-}
-
-int
-fg_events_client_init_inet (struct fg_events_data *etdata,
                             fg_handle_event_cb cb, fg_handle_read_cb read_cb,
                             void *arg, char *inet_addr, uint16_t port,
                             int8_t user_id)
@@ -794,14 +1110,6 @@ fg_events_client_init_inet (struct fg_events_data *etdata,
     sem_destroy (&etdata->init_flag);
 
     return etdata->save_errno;
-}
-
-int
-fg_events_client_init_unix (struct fg_events_data *etdata,
-                            fg_handle_event_cb cb, void *arg, char *unix_path,
-                            int8_t user_id)
-{
-    return fg_events_client_init_unix (etdata, cb, NULL, arg, unix_path);
 }
 
 int
@@ -835,12 +1143,42 @@ fg_events_client_init_unix (struct fg_events_data *etdata,
 }
 
 static void
-fg_exit_cb (evutil_socket_t sig, short events, void *arg)
+fg_exit_cb (evutil_socket_t UNUSED(sig), short UNUSED(events), void *arg)
 {
     struct fg_events_data *itdata = arg;
 
     itdata->running = false;
     event_base_loopexit (itdata->base, NULL);
+}
+
+static void
+fg_ping_cb (evutil_socket_t UNUSED(sig), short UNUSED(events), void *arg)
+{
+    struct fg_events_data *itdata = arg;
+    struct fgevent fgev;
+    
+    fgev.id = FG_ALIVE;
+    fgev.sender = itdata->user_id;    
+    fgev.length = 0;
+
+    for (struct node *cur_head = itdata->clients;
+      cur_head != NULL;
+      cur_head = cur_head->next)
+    {
+      struct client_t *client = cur_head->value;
+      if (client->status != CONNECTED) continue;      
+
+      if (++client->failed > 5)
+        {
+          client->status = DROPPED;
+        }
+
+      fgev.receiver = client->user_id;
+      if (fg_send_event_bev (itdata, client->bev, &fgev) < 0)
+        {
+          report_error (itdata, "fg_send_event_bev failed");
+        }
+    }
 }
 
 void
@@ -858,5 +1196,6 @@ fg_events_server_shutdown (struct fg_events_data *itdata)
 void
 fg_events_client_shutdown (struct fg_events_data *itdata)
 {
+    fg_send_disconnected_event (itdata);
     fg_events_server_shutdown (itdata);
 }

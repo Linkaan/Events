@@ -12,8 +12,16 @@
 #include <event2/event-config.h>
 #include <event2/thread.h>
 
+/* macro to supress unused parameter warnings */
+#ifdef UNUSED
+#elif defined(__GNUC__)
+# define UNUSED(x) UNUSED_ ## x __attribute__((unused))
+#else
+# define UNUSED(x) x
+#endif
+
 static void
-accept_error_cb (struct evconnlistener *listener, void *arg)
+accept_error_cb (struct evconnlistener *listener, void * UNUSED(arg))
 {
     int err;
     struct event_base *base;
@@ -47,7 +55,6 @@ setup_unix (struct event_base *base, struct evconnlistener **listener, char *uni
                                          sizeof (sun));
     if (_listener == NULL)
       {
-        //report_error_en (itdata, EAGAIN, "Could not create unix listener");
         perror ("Could not create unix listener");
         return -1;
       }
@@ -62,10 +69,10 @@ setup_unix (struct event_base *base, struct evconnlistener **listener, char *uni
 int
 main(void)
 {
-	struct evconnlistener *listener;
-	struct event_base *base = event_base_new ();
+  	struct evconnlistener *listener;
+  	struct event_base *base = event_base_new ();
 
-	if (base == NULL)
+  	if (base == NULL)
       {
       	printf("Could not create libevent base\n");
       	return 1;
