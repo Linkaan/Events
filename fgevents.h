@@ -34,7 +34,11 @@
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
 
+#ifdef FG_RELINC
+#include "../serializer/serializer.h"
+#else
 #include <serializer.h>
+#endif
 
 #include "list.h"
 
@@ -116,5 +120,10 @@ extern void fg_events_client_shutdown (struct fg_events_data *);
    control characters */
 extern int fg_parse_fgevent (struct fgevent *, unsigned char *, size_t,
                              unsigned char **);
+
+/* Helper function to buffer fgevent struct to memory that can be sent
+   over network */
+extern int create_serialized_fgevent_buffer (unsigned char **,
+                                             struct fgevent *);
 
 #endif /* _FGEVENTS_H_ */

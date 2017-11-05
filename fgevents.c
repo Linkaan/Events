@@ -59,8 +59,6 @@
 #include <event2/event-config.h>
 #include <event2/thread.h>
 
-#include <serializer.h>
-
 #include "fgevents.h"
 #include "list.h"
 
@@ -90,6 +88,8 @@
         do { errno = en;report_error (etdata, msg); } while (0)
 
 /* Forward declarations used in this file. */
+static void fg_dispatch_event (struct fg_events_data *itdata,
+                               struct bufferevent *bev, struct fgevent *fgev);
 static void fg_handle_new_event (struct fg_events_data *,
                                  struct bufferevent *, struct fgevent *);
 static void fg_handle_new_conn_event (struct fg_events_data *,
@@ -240,7 +240,7 @@ fg_parse_fgevent (struct fgevent *fgev, unsigned char *buffer,
     return ptr - buffer;
 }
 
-static int
+int
 create_serialized_fgevent_buffer (unsigned char **buf, struct fgevent *fgev)
 {
     unsigned char *buffer;    
@@ -327,7 +327,11 @@ fg_handle_new_event (struct fg_events_data *itdata, struct bufferevent *bev,
         writeback = itdata->cb (itdata->user_data, fgev, &ansev);
         if (writeback)
           {
-            if (fg_send_event_bev (itdata, bev, &ansev) < 0)
+            if (itdata->is_server)
+              {
+                fg_dispatch_event (itdata, NULL, &ansev);
+              }
+            else if (fg_send_event_bev (itdata, bev, &ansev) < 0)
               {
                 report_error (itdata, "fg_send_event_bev failed");
               }
@@ -356,28 +360,42 @@ fg_handle_new_event (struct fg_events_data *itdata, struct bufferevent *bev,
             fg_handle_new_conn_event (itdata, bev, fgev);
           }
         else
-          {          
-            // we are the server and should send the event to the receiver client
-            struct client_t *client = get_client_by_user_id (itdata,
-                                                             fgev->receiver);
-            if (client == NULL)
-              {
-                  /* TODO: if sender requires writeback, send back a FG_NO_SUCH_USER
-                    event */
-                  return;
-              }
-
-            if (client->status != CONNECTED)
-              {
-                  fg_send_offline_event (itdata, bev, fgev);
-                  return;
-              }
-
-            if (fg_send_event_bev (itdata, client->bev, fgev) < 0)
-              {
-                report_error (itdata, "fg_send_event_bev failed");
-              }
+          {
+            fg_dispatch_event (itdata, bev, fgev);                        
           }
+      }
+}
+
+static void
+fg_dispatch_event (struct fg_events_data *itdata, struct bufferevent *bev,
+                   struct fgevent *fgev)
+{
+    struct client_t *client = get_client_by_user_id (itdata,
+                                                     fgev->receiver);
+    if (client == NULL)
+      {
+        /* TODO: if sender requires writeback, send back a FG_NO_SUCH_USER
+          event */
+        return;
+      }
+
+    if (client->status != CONNECTED)
+      {
+        if (bev == NULL)
+          {
+            // TODO: this is the server dispatching from writeback, send
+            // the host program a callback with offline event
+          }
+        else
+          {
+            fg_send_offline_event (itdata, bev, fgev);
+          }        
+        return;
+      }
+
+    if (fg_send_event_bev (itdata, client->bev, fgev) < 0)
+      {
+        report_error (itdata, "fg_send_event_bev failed");
       }
 }
 
@@ -530,7 +548,8 @@ fg_write_cb (struct bufferevent *bev, void * UNUSED(arg))
 static void
 fg_event_client_cb (struct bufferevent *bev, short events, void *arg)
 {
-    struct fg_events_data *itdata = arg;
+    struct client_t *holder = arg;
+    struct fg_events_data *itdata = holder->itdata;
 
     if (events & BEV_EVENT_CONNECTED)
       {
@@ -756,7 +775,7 @@ fg_send_disconnected_event (struct fg_events_data *etdata)
 
     if (fg_send_event (etdata, &fgev) < 0)
       {
-        report_error (etdata, "fg_send_connected_event failed");
+        report_error (etdata, "fg_send_disconnected_event failed");
         return -1;
       }
 

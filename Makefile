@@ -46,10 +46,15 @@ lib$(NAME).so.$(VERSION): $(OBJECTS)
     ifndef CC
 	$(error CC not set, please invoke with CC set to path of arm-rpi-linux-gnueabihf-gcc)
     endif
-	$(CC) -c $< -o $@ $(CFLAGS) -fPIC
+	$(CC) -c $< -o $@ $(CFLAGS) $(DEFINES) -fPIC
 
 $(TESTS): test/%_test : test/%.c
 	$(CC) -o $@ $^ $(CFLAGS) -I. -L. $(LINKS) $(LIBS) -lcrypto -lz -l$(NAME)
+
+install: all
+	install -m 0755 lib$(NAME).so.$(VERSION) /usr/local/lib
+	/sbin/ldconfig
+	ln -nsf /usr/local/lib/lib$(NAME).so.$(VERSION) /usr/local/lib/lib$(NAME).so
 
 .PHONY: clean all_tests
 

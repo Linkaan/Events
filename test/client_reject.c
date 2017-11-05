@@ -124,18 +124,24 @@ main (void)
     fg_events_client_init_inet (&clients[0], &client_callback, NULL, &test_data, "127.0.0.1", server.port, RECEIVER_ID);
     fg_events_client_init_unix (&clients[1], &client_callback, NULL, &test_data, server.addr, RECEIVER_ID + 1);
 
+    sleep (1); // make sure all clients are connected
+
+    pthread_mutex_lock (test_data.mutex);
     memcpy (&fgev, &event, sizeof (struct fgevent));
     fgev.id = EVENT_ID;
     fgev.receiver = RECEIVER_ID;
     test_data.client_to_disable = &clients[1];
     fg_send_event (&clients[1], &fgev);
+    pthread_mutex_unlock (test_data.mutex);
 
     sleep (6);
 
+    pthread_mutex_lock (test_data.mutex);
     memcpy (&fgev, &event, sizeof (struct fgevent));
     fgev.id = EVENT_ID;
     fgev.receiver = RECEIVER_ID + 1;
     fg_send_event (&clients[0], &fgev);
+    pthread_mutex_unlock (test_data.mutex);
 
     clock_gettime (CLOCK_REALTIME, &ts);
 
@@ -153,7 +159,6 @@ main (void)
     pthread_mutex_destroy (&mutex);
     
     fg_events_client_shutdown (&clients[0]);
-    fg_events_client_shutdown (&clients[1]);
     fg_events_server_shutdown (&server);
 
     PRINT_SUCCESS ("all tests passed");

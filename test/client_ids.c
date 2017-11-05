@@ -307,6 +307,8 @@ main (void)
   clients_data[4].sem = &pass_test_sem;
   fg_events_client_init_unix (&clients[4], &client_callback, NULL, &clients_data[4], server.addr, 6);
 
+  sleep (1); // make sure all clients are connected
+
   fg_send_event (&clients[0], &init_event);
 
   clock_gettime (CLOCK_REALTIME, &ts);
