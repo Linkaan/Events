@@ -55,6 +55,7 @@ typedef void (*fg_handle_read_cb)(unsigned char *, size_t, void *);
 
 enum client_status {
     UNITIALIZED,
+    CONNECTING,
     CONNECTED,
     DISCONNECTED,
     DROPPED
@@ -83,6 +84,7 @@ struct fg_events_data {
     fg_handle_event_cb    cb;
     fg_handle_read_cb     read_cb;
     sem_t                 init_flag;
+    int                   connstatus;
     bool                  is_server;
     bool                  running;
     bool                  sigpipe_pending;

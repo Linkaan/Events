@@ -479,7 +479,8 @@ fg_handle_conn_confirm_event (struct fg_events_data *itdata,
         report_error (itdata, "fg_send_connected_event failed");
       }
 
-    sem_post (&itdata->init_flag); /* TODO: set status to CONNECTED */
+    itdata->connstatus = CONNECTED;
+    sem_post (&itdata->init_flag);
 }
 
 static void
@@ -682,7 +683,7 @@ accept_conn_cb (struct evconnlistener *listener, evutil_socket_t fd,
     struct fg_events_data *itdata = arg;
 
     base = evconnlistener_get_base (listener);
-    bev = bufferevent_socket_new (base, fd, BEV_OPT_CLOSE_ON_FREE);
+    bev = bufferevent_socket_new (base, fd, BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
     s = add_client (itdata, bev, &client, conn_tot);
     set_tcp_no_delay (fd);
     evbuffer_enable_locking (bufferevent_get_output (bev), NULL);
@@ -787,7 +788,9 @@ fg_send_event_bev (struct fg_events_data *etdata, struct bufferevent *bev,
                    struct fgevent *fgev)
 {
     ssize_t s;
-    unsigned char *fgbuf;    
+    unsigned char *fgbuf;
+
+    if (etdata->connstatus == DISCONNECTED) return 0;
     
     s = create_serialized_fgevent_buffer (&fgbuf, fgev);
     if (s < 0)
@@ -807,6 +810,8 @@ fg_send_data_bev (struct fg_events_data *itdata, struct bufferevent *bev,
     ssize_t s;
     struct evbuffer *output;
 
+    if (itdata->connstatus == DISCONNECTED) return 0;
+
     output = bufferevent_get_output (bev);
     evbuffer_lock (output);
     suppress_sigpipe (itdata);
@@ -821,13 +826,11 @@ fg_send_data_bev (struct fg_events_data *itdata, struct bufferevent *bev,
 int
 fg_send_event (struct fg_events_data *etdata, struct fgevent *fgev)
 {
-    static int temp_count = 0;
+    if (etdata->connstatus == DISCONNECTED) return 0;
+
     // TODO: if we are the server, send the event to ourself
     fgev->sender = etdata->user_id;
-    if (fgev->sender == 2 && fgev->id == 2 && ++temp_count == 2) {
-      printf("should not get here\n");
-    }
-    //printf("%d sent %d\n", fgev->sender, fgev->id);
+
     return fg_send_event_bev (etdata, etdata->bev, fgev);
 }
 
@@ -956,6 +959,7 @@ events_thread_server_start (void *param)
     if (!itdata->pingev || event_add (itdata->pingev, &pinginterval) < 0)
         report_error_noen (itdata, "Could not create/add ping event");
 
+    itdata->connstatus = CONNECTED;
     sem_post (&itdata->init_flag);
     event_base_dispatch (itdata->base);
 
@@ -992,12 +996,14 @@ client_event_loop (struct fg_events_data *itdata)
         holder.itdata = itdata;
 
         itdata->bev = bufferevent_socket_new (itdata->base, -1,
-                                              BEV_OPT_CLOSE_ON_FREE);
+                                              BEV_OPT_CLOSE_ON_FREE | BEV_OPT_THREADSAFE);
         evbuffer_enable_locking (bufferevent_get_output (itdata->bev), NULL);
         bufferevent_setcb (itdata->bev, fg_read_cb, NULL, fg_event_client_cb,
                            &holder);
         bufferevent_enable (itdata->bev, EV_READ | EV_PERSIST | EV_WRITE);
-        /* TODO: set status to DISCONNECTED */
+
+        itdata->connstatus = CONNECTING;
+
         if (itdata->port > 0)
           {
             /* connect via inet sockets */
@@ -1036,7 +1042,9 @@ client_event_loop (struct fg_events_data *itdata)
         event_base_dispatch (itdata->base);
 
         bufferevent_free (itdata->bev);
-        /* TODO: set status to DISCONNECTED */
+
+        itdata->connstatus = DISCONNECTED;
+        /* TODO: timeout should listen to signals such as SIGINT */
         // wait 10 seconds before attempting to re-connect unless exitting
         if (itdata->running)        
             usleep (10 * 1000 * 1000);
@@ -1049,12 +1057,17 @@ events_thread_client_start (void *param)
     struct fg_events_data *itdata = param;
 
     evthread_use_pthreads ();
-    itdata->base = event_base_new ();
+
+    struct event_config *config = event_config_new ();
+
+    itdata->base = event_base_new_with_config (config);
     if (itdata->base == NULL)
       {
         report_error_noen (itdata, "Could not create event base");
         return NULL;
       }
+
+    event_config_free (config);
 
     /* Register event to be able to break out of event loop when raised */
     itdata->exev = event_new (itdata->base, -1, 0, fg_exit_cb, itdata);
